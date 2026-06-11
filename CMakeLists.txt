@@ -1,0 +1,30 @@
+cmake_minimum_required(VERSION 3.24)
+
+project(ncgear_paper_samples LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+find_package(CGAL REQUIRED)
+
+add_library(ncgear
+  src/gear.cpp
+)
+target_include_directories(ncgear PUBLIC include)
+target_link_libraries(ncgear PUBLIC CGAL::CGAL)
+
+add_executable(ncgear_generate src/main.cpp)
+target_link_libraries(ncgear_generate PRIVATE ncgear)
+
+enable_testing()
+add_executable(ncgear_tests tests/test_gears.cpp)
+target_link_libraries(ncgear_tests PRIVATE ncgear)
+add_test(NAME ncgear_tests COMMAND ncgear_tests)
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "AppleClang|Clang|GNU")
+  target_compile_options(ncgear PRIVATE -Wall -Wextra -Wpedantic -Wconversion)
+  target_compile_options(ncgear_generate PRIVATE -Wall -Wextra -Wpedantic -Wconversion)
+  target_compile_options(ncgear_tests PRIVATE -Wall -Wextra -Wpedantic -Wconversion)
+endif()
+
