@@ -19,7 +19,8 @@ void usage() {
          "[--samples-per-radian N]\n"
          "       ncgear_generate --transmission-csv FILE [--open] --name NAME "
          "--teeth N --module M --domain-start A --domain-end B "
-         "[--active-start A --active-end B] [--period P --cycle-delta D]\n";
+         "[--active-start A --active-end B] [--period P --cycle-delta D] "
+         "[--allow-nonconvex]\n";
 }
 
 ncgear::TransmissionSamples read_transmission_csv(
@@ -80,6 +81,7 @@ int main(int argc, char** argv) {
     double period = 2.0 * ncgear::kPi;
     double cycle_delta = 2.0 * ncgear::kPi;
     bool open = false;
+    bool allow_nonconvex = false;
 
     for (int i = 1; i < argc; ++i) {
       const std::string argument = argv[i];
@@ -119,6 +121,8 @@ int main(int argc, char** argv) {
         cycle_delta = std::stod(argv[++i]);
       } else if (argument == "--open") {
         open = true;
+      } else if (argument == "--allow-nonconvex") {
+        allow_nonconvex = true;
       } else if (argument == "--samples-per-radian" && i + 1 < argc) {
         samples_per_radian = std::stoi(argv[++i]);
       } else if (argument == "--help" || argument == "-h") {
@@ -149,6 +153,7 @@ int main(int argc, char** argv) {
       config.transmission.active_end = active_end;
       config.transmission.period = period;
       config.transmission.cycle_delta = cycle_delta;
+      config.allow_nonconvex_centrodes = allow_nonconvex;
       samples.push_back(std::move(config));
     } else if (sample_name == "all") {
       samples = ncgear::builtin_samples();
@@ -172,7 +177,13 @@ int main(int argc, char** argv) {
                 << "  max refined intersection residual: "
                 << result.maximum_intersection_residual << "\n"
                 << "  placed pair overlap area: "
-                << result.placed_pair_overlap_area << "\n";
+                << result.placed_pair_overlap_area << "\n"
+                << "  centrodes convex: "
+                << (result.centrodes_are_convex ? "yes" : "no") << "\n"
+                << "  max drive curvature: "
+                << result.maximum_drive_curvature << "\n"
+                << "  min driven curvature: "
+                << result.minimum_driven_curvature << "\n";
     }
     return EXIT_SUCCESS;
   } catch (const std::exception& error) {

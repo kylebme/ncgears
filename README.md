@@ -34,6 +34,7 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ./build/ncgear_generate --sample all --out out
 python3 scripts/render_samples.py --input out
+python3 scripts/generate_gallery.py --out out
 ```
 
 Each sample directory contains `drive.csv`, `driven.csv`, `metadata.json`,
@@ -59,8 +60,15 @@ python3 scripts/generate_sympy.py "phi + 0.05*erf(phi)" \
   --open --name open_erf --teeth 12 --drive-end 2.4
 ```
 
-Closed functions must have periodic first through third derivatives. Their
-cycle advance determines the driven tooth count, and
-`z1 * period / cycle_delta` must be an integer. Open functions only require a
-strictly positive derivative on the padded finite domain; their average ratio
-may be any positive value.
+Closed functions must have periodic first through third derivatives over both
+the drive period and one driven-gear revolution. Their cycle advance determines
+the driven tooth count, and `z1 * period / cycle_delta` must be an integer.
+Open functions require a strictly positive derivative on the padded finite
+domain; their average ratio may be any positive value subject to the cutter and
+polygon validity checks.
+
+The extended gallery contains four closed ratios (`1:2`, `3:2`, `5:3`, and
+`2:1`) and four finite open transmissions (exponential acceleration, smooth
+S-curve, localized step, and quadratic ramp). See
+[`docs/limitations.md`](docs/limitations.md) for the edge cases discovered
+while building it.

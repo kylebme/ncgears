@@ -106,6 +106,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--samples", type=int, default=8192)
     parser.add_argument("--padding-pitches", type=float, default=7.0)
+    parser.add_argument(
+        "--allow-nonconvex",
+        action="store_true",
+        help="Attempt locally valid rack envelopes across centrode inflections",
+    )
     parser.add_argument("--samples-per-radian", type=int, default=110)
     parser.add_argument("--out", type=Path, default=root / "out")
     parser.add_argument(
@@ -160,7 +165,38 @@ def main(argv: list[str] | None = None) -> int:
         )
         if cycle_delta <= 0.0:
             raise SystemExit("Closed mode requires a positive cycle advance.")
-        phis = np.linspace(domain_start, domain_end, args.samples, endpoint=False)
+        exact_driven_teeth = args.teeth * args.period / cycle_delta
+        driven_teeth = round(exact_driven_teeth)
+        if driven_teeth <= 0 or not math.isclose(
+            exact_driven_teeth, driven_teeth, rel_tol=1e-8, abs_tol=1e-8
+        ):
+            raise SystemExit(
+                "Closed mode requires teeth * period / cycle advance to be an integer."
+            )
+        driven_cycle = args.period * driven_teeth / args.teeth
+        for order in range(1, 4):
+            derivative = sp.diff(expression, PHI, order)
+            difference = sp.simplify(
+                derivative.subs(PHI, PHI + driven_cycle) - derivative
+            )
+            if difference != 0:
+                check_points = np.linspace(domain_start, domain_end, 257)
+                function = sp.lambdify(PHI, difference, modules=["numpy", "scipy"])
+                values = np.asarray(function(check_points), dtype=float)
+                if values.shape == ():
+                    values = np.full_like(check_points, float(values))
+                if np.max(np.abs(values)) > 1e-7:
+                    raise SystemExit(
+                        "Closed mode requires derivatives to repeat over one "
+                        "driven-gear revolution."
+                    )
+        sample_multiple = args.teeth // math.gcd(args.teeth, driven_teeth)
+        closed_sample_count = (
+            (args.samples + sample_multiple - 1) // sample_multiple
+        ) * sample_multiple
+        phis = np.linspace(
+            domain_start, domain_end, closed_sample_count, endpoint=False
+        )
 
     arrays = evaluate_expression(expression, phis)
     sample_directory = args.out / args.name
@@ -207,6 +243,8 @@ def main(argv: list[str] | None = None) -> int:
     ]
     if args.open:
         command.append("--open")
+    if args.allow_nonconvex:
+        command.append("--allow-nonconvex")
     subprocess.run(command, check=True)
 
     if not args.no_render:

@@ -49,6 +49,7 @@ struct SampleConfig {
   double fillet_factor = 0.3;
   GearTopology topology = GearTopology::kClosed;
   TransmissionSamples transmission;
+  bool allow_nonconvex_centrodes = false;
 };
 
 struct ToothCheckpoint {
@@ -72,6 +73,9 @@ struct GenerationResult {
   double maximum_join_gap = 0.0;
   double maximum_intersection_residual = 0.0;
   double placed_pair_overlap_area = 0.0;
+  bool centrodes_are_convex = true;
+  double maximum_drive_curvature = 0.0;
+  double minimum_driven_curvature = 0.0;
   std::vector<ToothCheckpoint> checkpoints;
   std::vector<Point> drive_outline;
   std::vector<Point> driven_outline;

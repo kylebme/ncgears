@@ -26,6 +26,19 @@ void require_near(double actual, double expected, double tolerance, const std::s
   }
 }
 
+template <typename Function>
+void require_throws_with(Function function, const std::string& text) {
+  try {
+    function();
+  } catch (const std::exception& error) {
+    require(
+        std::string(error.what()).find(text) != std::string::npos,
+        "unexpected error: " + std::string(error.what()));
+    return;
+  }
+  throw std::runtime_error("expected exception containing: " + text);
+}
+
 ncgear::TransmissionSamples sample_transmission(
     double domain_start,
     double domain_end,
@@ -201,6 +214,54 @@ void test_open_sampled_variable_ratio() {
   require(result.placed_pair_overlap_area < 2.5e-5, "open sampled overlap tolerance");
 }
 
+void test_closed_driven_cycle_validation() {
+  ncgear::SampleConfig incompatible;
+  incompatible.name = "incompatible_cycle";
+  incompatible.description = "psi(phi) = 2 phi - 0.04 sin(3 phi)";
+  incompatible.teeth = 30;
+  incompatible.transmission = sample_transmission(
+      0.0,
+      2.0 * ncgear::kPi,
+      4096,
+      [](double phi) {
+        return std::array<double, 4>{
+            2.0 * phi - 0.04 * std::sin(3.0 * phi),
+            2.0 - 0.12 * std::cos(3.0 * phi),
+            0.36 * std::sin(3.0 * phi),
+            1.08 * std::cos(3.0 * phi),
+        };
+      },
+      false);
+  incompatible.transmission.period = 2.0 * ncgear::kPi;
+  incompatible.transmission.cycle_delta = 4.0 * ncgear::kPi;
+  require_throws_with(
+      [&incompatible]() { ncgear::GearGenerator(incompatible).generate(50); },
+      "not periodic over one driven-gear revolution");
+
+  ncgear::SampleConfig misaligned;
+  misaligned.name = "misaligned_cycle";
+  misaligned.description = "psi(phi) = 5/3 phi - 0.03 sin(5 phi)";
+  misaligned.teeth = 30;
+  misaligned.transmission = sample_transmission(
+      0.0,
+      2.0 * ncgear::kPi,
+      4096,
+      [](double phi) {
+        return std::array<double, 4>{
+            (5.0 / 3.0) * phi - 0.03 * std::sin(5.0 * phi),
+            5.0 / 3.0 - 0.15 * std::cos(5.0 * phi),
+            0.75 * std::sin(5.0 * phi),
+            3.75 * std::cos(5.0 * phi),
+        };
+      },
+      false);
+  misaligned.transmission.period = 2.0 * ncgear::kPi;
+  misaligned.transmission.cycle_delta = (10.0 / 3.0) * ncgear::kPi;
+  require_throws_with(
+      [&misaligned]() { ncgear::GearGenerator(misaligned).generate(50); },
+      "grid does not align with the driven cycle");
+}
+
 }  // namespace
 
 int main() {
@@ -209,6 +270,7 @@ int main() {
     test_all_samples();
     test_closed_sampled_unequal_ratio();
     test_open_sampled_variable_ratio();
+    test_closed_driven_cycle_validation();
     std::cout << "All ncgear tests passed.\n";
     return EXIT_SUCCESS;
   } catch (const std::exception& error) {

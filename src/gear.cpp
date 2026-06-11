@@ -602,6 +602,7 @@ struct GearGenerator::Impl {
       drive_cycle = period();
       driven_cycle = period() * static_cast<double>(driven_teeth) /
                      static_cast<double>(drive_teeth);
+      validate_driven_cycle();
     } else {
       driven_teeth = drive_teeth;
       drive_cycle = active_end - active_start;
@@ -636,6 +637,31 @@ struct GearGenerator::Impl {
 
   double cycle_delta() const {
     return has_sampled_transmission() ? config.transmission.cycle_delta : 2.0 * kPi;
+  }
+
+  void validate_driven_cycle() const {
+    if (has_sampled_transmission()) {
+      const double sample_shift =
+          driven_cycle * static_cast<double>(config.transmission.psi.size()) /
+          period();
+      if (std::abs(sample_shift - std::round(sample_shift)) > 1e-8) {
+        throw std::invalid_argument(
+            "Closed sampled transmission grid does not align with the driven cycle.");
+      }
+    }
+    const double scale = std::max(1.0, std::abs(cycle_delta()));
+    for (int index = 0; index < 2048; ++index) {
+      const double phi =
+          active_start + period() * static_cast<double>(index) / 2048.0;
+      const double shifted = phi + driven_cycle;
+      if (std::abs((psi(shifted) - psi(phi)) - 2.0 * kPi) > 2e-5 * scale ||
+          std::abs(psi1(shifted) - psi1(phi)) > 2e-5 ||
+          std::abs(psi2(shifted) - psi2(phi)) > 5e-5 ||
+          std::abs(psi3(shifted) - psi3(phi)) > 1e-4) {
+        throw std::invalid_argument(
+            "Closed transmission is not periodic over one driven-gear revolution.");
+      }
+    }
   }
 
   void validate_config() const {
@@ -910,9 +936,9 @@ struct GearGenerator::Impl {
     return midpoint + fillet_radius * normal;
   }
 
-  void validate_centrodes() const {
-    double maximum_drive_kappa = -std::numeric_limits<double>::infinity();
-    double minimum_driven_kappa = std::numeric_limits<double>::infinity();
+  void validate_centrodes() {
+    maximum_drive_curvature = -std::numeric_limits<double>::infinity();
+    minimum_driven_curvature = std::numeric_limits<double>::infinity();
     std::vector<Point> drive;
     std::vector<Point> driven;
     drive.reserve(4096);
@@ -924,16 +950,18 @@ struct GearGenerator::Impl {
                       : std::lerp(domain_start(), domain_end(), fraction);
       const double driven_phi =
           is_closed() ? active_start + fraction * driven_cycle : drive_phi;
-      maximum_drive_kappa =
-          std::max(maximum_drive_kappa, drive_kappa(drive_phi));
-      minimum_driven_kappa =
-          std::min(minimum_driven_kappa, driven_kappa(driven_phi));
+      maximum_drive_curvature =
+          std::max(maximum_drive_curvature, drive_kappa(drive_phi));
+      minimum_driven_curvature =
+          std::min(minimum_driven_curvature, driven_kappa(driven_phi));
       if (is_closed()) {
         drive.push_back(to_point(drive_centrode(drive_phi)));
         driven.push_back(to_point(driven_centrode(driven_phi)));
       }
     }
-    if (maximum_drive_kappa > 1e-9 || minimum_driven_kappa < -1e-9) {
+    centrodes_are_convex =
+        maximum_drive_curvature <= 1e-9 && minimum_driven_curvature >= -1e-9;
+    if (!centrodes_are_convex && !config.allow_nonconvex_centrodes) {
       throw std::runtime_error("Sample centrodes are not convex with paper-compatible orientation.");
     }
     if (is_closed()) {
@@ -999,7 +1027,7 @@ struct GearGenerator::Impl {
     throw std::runtime_error("Unable to bracket a required open-gear root.");
   }
 
-  double singular(int tooth, Flank flank, bool driven) const {
+  std::optional<double> singular(int tooth, Flank flank, bool driven) const {
     const double sign = flank_sign(flank);
     const ScalarFunction equation = [this, tooth, flank, driven, sign](double phi) {
       const double curvature = driven ? driven_kappa(phi) : drive_kappa(phi);
@@ -1011,11 +1039,18 @@ struct GearGenerator::Impl {
     } else {
       direction = flank == Flank::kMinus ? 1 : -1;
     }
-    return directional_root(
-        equation,
-        chis[static_cast<std::size_t>(tooth)],
-        direction,
-        5.0 * mean_pitch_phi);
+    try {
+      return directional_root(
+          equation,
+          chis[static_cast<std::size_t>(tooth)],
+          direction,
+          5.0 * mean_pitch_phi);
+    } catch (const std::runtime_error&) {
+      if (config.allow_nonconvex_centrodes) {
+        return std::nullopt;
+      }
+      throw;
+    }
   }
 
   double solve_lambda_target(
@@ -1235,12 +1270,20 @@ struct GearGenerator::Impl {
     driven_free_plus.resize(scalar_count);
 
     for (int tooth = geometry_first_tooth(); tooth <= geometry_last_tooth(); ++tooth) {
-      const double drive_minus = singular(tooth, Flank::kMinus, false);
-      const double drive_plus = singular(tooth, Flank::kPlus, false);
+      const std::optional<double> drive_minus_root =
+          singular(tooth, Flank::kMinus, false);
+      const std::optional<double> drive_plus_root =
+          singular(tooth, Flank::kPlus, false);
+      const double drive_minus =
+          drive_minus_root.value_or(chis[static_cast<std::size_t>(tooth)]);
+      const double drive_plus =
+          drive_plus_root.value_or(chis[static_cast<std::size_t>(tooth)]);
       const double drive_minus_kappa = drive_kappa(drive_minus);
       const double drive_plus_kappa = drive_kappa(drive_plus);
-      const bool drive_minus_free = -drive_minus_kappa <= curvature_limit + 1e-11;
-      const bool drive_plus_free = -drive_plus_kappa <= curvature_limit + 1e-11;
+      const bool drive_minus_free =
+          !drive_minus_root || -drive_minus_kappa <= curvature_limit + 1e-11;
+      const bool drive_plus_free =
+          !drive_plus_root || -drive_plus_kappa <= curvature_limit + 1e-11;
 
       const std::size_t index = static_cast<std::size_t>(tooth);
       drive_singular_minus[index] = drive_minus;
@@ -1264,15 +1307,23 @@ struct GearGenerator::Impl {
     const int driven_geometry_last =
         is_closed() ? driven_teeth - 1 : geometry_last_tooth();
     for (int tooth = driven_geometry_first; tooth <= driven_geometry_last; ++tooth) {
-      const double driven_minus = singular(tooth, Flank::kMinus, true);
-      const double driven_plus = singular(tooth, Flank::kPlus, true);
+      const std::optional<double> driven_minus_root =
+          singular(tooth, Flank::kMinus, true);
+      const std::optional<double> driven_plus_root =
+          singular(tooth, Flank::kPlus, true);
+      const double driven_minus =
+          driven_minus_root.value_or(chis[static_cast<std::size_t>(tooth)]);
+      const double driven_plus =
+          driven_plus_root.value_or(chis[static_cast<std::size_t>(tooth)]);
       const double driven_minus_kappa = driven_kappa(driven_minus);
       const double driven_plus_kappa = driven_kappa(driven_plus);
       const std::size_t index = static_cast<std::size_t>(tooth);
       driven_singular_minus[index] = driven_minus;
       driven_singular_plus[index] = driven_plus;
-      driven_free_minus[index] = driven_minus_kappa <= curvature_limit + 1e-11;
-      driven_free_plus[index] = driven_plus_kappa <= curvature_limit + 1e-11;
+      driven_free_minus[index] =
+          !driven_minus_root || driven_minus_kappa <= curvature_limit + 1e-11;
+      driven_free_plus[index] =
+          !driven_plus_root || driven_plus_kappa <= curvature_limit + 1e-11;
     }
   }
 
@@ -1693,6 +1744,9 @@ struct GearGenerator::Impl {
         maximum_join_gap,
         maximum_intersection_residual,
         overlap_area,
+        centrodes_are_convex,
+        maximum_drive_curvature,
+        minimum_driven_curvature,
         checkpoints,
         std::move(drive),
         std::move(driven),
@@ -1707,7 +1761,7 @@ struct GearGenerator::Impl {
   IntegralTable integral;
   int drive_teeth = 0;
   int driven_teeth = 0;
-  int padding_teeth = 6;
+  int padding_teeth = 2;
   double active_start = 0.0;
   double active_end = 0.0;
   double drive_cycle = 0.0;
@@ -1719,6 +1773,9 @@ struct GearGenerator::Impl {
   double curvature_limit = 0.0;
   double maximum_join_gap = 0.0;
   double maximum_intersection_residual = 0.0;
+  bool centrodes_are_convex = true;
+  double maximum_drive_curvature = 0.0;
+  double minimum_driven_curvature = 0.0;
   std::vector<double> chis;
   std::vector<double> drive_singular_minus;
   std::vector<double> drive_singular_plus;
@@ -1747,6 +1804,7 @@ std::vector<SampleConfig> builtin_samples() {
           0.3,
           GearTopology::kClosed,
           {},
+          false,
       },
       {
           "two_lobe",
@@ -1760,6 +1818,7 @@ std::vector<SampleConfig> builtin_samples() {
           0.3,
           GearTopology::kClosed,
           {},
+          false,
       },
       {
           "asymmetric",
@@ -1773,6 +1832,7 @@ std::vector<SampleConfig> builtin_samples() {
           0.3,
           GearTopology::kClosed,
           {},
+          false,
       },
       {
           "three_lobe",
@@ -1786,6 +1846,7 @@ std::vector<SampleConfig> builtin_samples() {
           0.3,
           GearTopology::kClosed,
           {},
+          false,
       },
   };
 }
@@ -1865,6 +1926,12 @@ void write_result(const GenerationResult& result, const std::filesystem::path& d
            << "  \"maximum_intersection_residual\": "
            << result.maximum_intersection_residual << ",\n"
            << "  \"placed_pair_overlap_area\": " << result.placed_pair_overlap_area << ",\n"
+           << "  \"centrodes_are_convex\": "
+           << (result.centrodes_are_convex ? "true" : "false") << ",\n"
+           << "  \"maximum_drive_curvature\": "
+           << result.maximum_drive_curvature << ",\n"
+           << "  \"minimum_driven_curvature\": "
+           << result.minimum_driven_curvature << ",\n"
            << "  \"drive_area\": " << signed_polygon_area(result.drive_outline) << ",\n"
            << "  \"driven_area\": " << signed_polygon_area(result.driven_outline) << "\n"
            << "}\n";
