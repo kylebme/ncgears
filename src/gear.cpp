@@ -35,6 +35,18 @@ using ExactPolygonSet = CGAL::Polygon_set_2<ExactKernel>;
 using ExactPolygonWithHoles = CGAL::Polygon_with_holes_2<ExactKernel>;
 using ScalarFunction = std::function<double(double)>;
 
+constexpr int kMaximumParallelWorkers = 8;
+
+int parallel_worker_limit(int concurrent_operations = 1) {
+  const unsigned hardware_threads = std::thread::hardware_concurrency();
+  const int available_threads = static_cast<int>(
+      hardware_threads == 0 ? 1 : hardware_threads);
+  return std::max(
+      1,
+      std::min(kMaximumParallelWorkers, available_threads) /
+          concurrent_operations);
+}
+
 constexpr std::array<double, 8> kGaussNodes = {
     -0.9602898564975363,
     -0.7966664774136267,
@@ -556,14 +568,10 @@ template <typename Function>
 std::vector<double> parallel_values(int count, Function function) {
   // Exact overlap checks are independent and expensive. Keep concurrency
   // bounded to avoid multiplying CGAL's peak arrangement memory.
-  constexpr int kMaximumWorkers = 8;
   std::vector<double> values(static_cast<std::size_t>(count));
-  const unsigned hardware_threads = std::thread::hardware_concurrency();
-  const int available_threads = static_cast<int>(
-      hardware_threads == 0 ? 1 : hardware_threads);
   const int worker_count = std::min(
       count,
-      std::min(kMaximumWorkers, available_threads));
+      parallel_worker_limit());
   const int block_size = (count + worker_count - 1) / worker_count;
   const auto evaluate_block = [&](int begin, int end) {
     for (int index = begin; index < end; ++index) {
@@ -592,6 +600,82 @@ std::vector<double> parallel_values(int count, Function function) {
     worker.get();
   }
   return values;
+}
+
+template <typename Function>
+void parallel_tasks(int count, Function function) {
+  std::vector<std::future<void>> workers;
+  workers.reserve(static_cast<std::size_t>(std::max(0, count - 1)));
+  for (int index = 1; index < count; ++index) {
+    try {
+      workers.push_back(std::async(
+          std::launch::async,
+          [&, index]() { function(index); }));
+    } catch (const std::system_error&) {
+      function(index);
+    }
+  }
+  function(0);
+  for (std::future<void>& worker : workers) {
+    worker.get();
+  }
+}
+
+ExactPolygonSet aggregate_polygon_union(
+    const std::vector<ExactPolygon>& polygons,
+    int maximum_workers) {
+  // Each partial and merge uses the same exact regularized union. Parallel
+  // reassociation changes neither the swept set nor its sampling resolution.
+  const int worker_count = std::min(
+      static_cast<int>(polygons.size()),
+      std::min(maximum_workers, parallel_worker_limit()));
+  if (worker_count <= 1) {
+    ExactPolygonSet result;
+    result.join(polygons.begin(), polygons.end());
+    return result;
+  }
+
+  const int polygon_count = static_cast<int>(polygons.size());
+  const int block_size =
+      (polygon_count + worker_count - 1) / worker_count;
+  std::vector<ExactPolygonSet> partials(
+      static_cast<std::size_t>(worker_count));
+  parallel_tasks(
+      worker_count,
+      [&](int worker) {
+        const int begin = worker * block_size;
+        const int end = std::min(polygon_count, begin + block_size);
+        partials[static_cast<std::size_t>(worker)].join(
+            polygons.begin() + begin,
+            polygons.begin() + end);
+      });
+
+  std::vector<int> active(static_cast<std::size_t>(worker_count));
+  std::iota(active.begin(), active.end(), 0);
+  while (active.size() > 2) {
+    const int pair_count =
+        static_cast<int>((active.size() + 1) / 2);
+    std::vector<int> reduced(static_cast<std::size_t>(pair_count));
+    parallel_tasks(
+        pair_count,
+        [&](int pair) {
+          const std::size_t left_index =
+              static_cast<std::size_t>(2 * pair);
+          const int left = active[left_index];
+          reduced[static_cast<std::size_t>(pair)] = left;
+          if (left_index + 1 < active.size()) {
+            const int right = active[left_index + 1];
+            partials[static_cast<std::size_t>(left)].join(
+                partials[static_cast<std::size_t>(right)]);
+          }
+        });
+    active = std::move(reduced);
+  }
+  ExactPolygonSet result;
+  result.join(
+      partials[static_cast<std::size_t>(active[0])],
+      partials[static_cast<std::size_t>(active[1])]);
+  return result;
 }
 
 }  // namespace
@@ -1032,8 +1116,12 @@ struct GearGenerator::Impl {
     }
     // CGAL's range join uses an aggregate divide-and-conquer overlay. This
     // avoids overlaying every cutter against an increasingly complex gear.
-    ExactPolygonSet swept_cutters;
-    swept_cutters.join(cutters.begin(), cutters.end());
+    ExactPolygonSet swept_cutters =
+        aggregate_polygon_union(
+            cutters,
+            config.profile_family == ProfileFamily::kCycloidalRack
+                ? parallel_worker_limit()
+                : parallel_worker_limit(2));
     gear.difference(swept_cutters);
 
     if (!is_closed()) {
@@ -1101,6 +1189,20 @@ struct GearGenerator::Impl {
     gear.insert(make_circle_polygon(blank_radius, 1024));
     const std::vector<Point> master = simplify_closed_for_sweep(
         master_outline, 2e-4 * std::max(1.0, config.module));
+    // All mate cutters are rigid transforms of this polygon, so simplicity
+    // needs to be established once rather than once per sweep phase.
+    ExactPolygon master_polygon;
+    for (std::size_t point_index = 0;
+         point_index + 1 < master.size();
+         ++point_index) {
+      master_polygon.push_back(ExactPoint(
+          master[point_index].x(),
+          master[point_index].y()));
+    }
+    if (!master_polygon.is_simple()) {
+      throw std::runtime_error(
+          "Simplified master gear is not a valid conjugate cutter.");
+    }
     std::vector<ExactPolygon> cutters;
     cutters.reserve(static_cast<std::size_t>(phase_count));
 
@@ -1123,14 +1225,10 @@ struct GearGenerator::Impl {
       if (cutter.orientation() == CGAL::CLOCKWISE) {
         cutter.reverse_orientation();
       }
-      if (!cutter.is_simple()) {
-        throw std::runtime_error(
-            "Simplified master gear is not a valid conjugate cutter.");
-      }
       cutters.push_back(cutter);
     }
-    ExactPolygonSet swept_cutters;
-    swept_cutters.join(cutters.begin(), cutters.end());
+    ExactPolygonSet swept_cutters =
+        aggregate_polygon_union(cutters, parallel_worker_limit());
     gear.difference(swept_cutters);
 
     if (!is_closed()) {
