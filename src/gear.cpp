@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <iomanip>
 #include <limits>
 #include <list>
@@ -18,6 +19,8 @@
 #include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -524,6 +527,18 @@ double polygon_set_area(const ExactPolygonSet& set) {
 }
 
 double placed_pair_overlap_area(
+    const ExactPolygonSet& placed_drive,
+    const std::vector<Point>& driven,
+    double center_distance,
+    double driven_angle) {
+  const ExactPolygon driven_polygon =
+      transform_polygon(driven, driven_angle, center_distance);
+  ExactPolygonSet overlap(placed_drive);
+  overlap.intersection(driven_polygon);
+  return polygon_set_area(overlap);
+}
+
+double placed_pair_overlap_area(
     const std::vector<Point>& drive,
     const std::vector<Point>& driven,
     double center_distance,
@@ -531,12 +546,52 @@ double placed_pair_overlap_area(
     double driven_angle) {
   const ExactPolygon drive_polygon =
       transform_polygon(drive, drive_angle, 0.0);
-  const ExactPolygon driven_polygon =
-      transform_polygon(driven, driven_angle, center_distance);
-  ExactPolygonSet overlap;
-  overlap.insert(drive_polygon);
-  overlap.intersection(driven_polygon);
-  return polygon_set_area(overlap);
+  ExactPolygonSet placed_drive;
+  placed_drive.insert(drive_polygon);
+  return placed_pair_overlap_area(
+      placed_drive, driven, center_distance, driven_angle);
+}
+
+template <typename Function>
+std::vector<double> parallel_values(int count, Function function) {
+  // Exact overlap checks are independent and expensive. Keep concurrency
+  // bounded to avoid multiplying CGAL's peak arrangement memory.
+  constexpr int kMaximumWorkers = 8;
+  std::vector<double> values(static_cast<std::size_t>(count));
+  const unsigned hardware_threads = std::thread::hardware_concurrency();
+  const int available_threads = static_cast<int>(
+      hardware_threads == 0 ? 1 : hardware_threads);
+  const int worker_count = std::min(
+      count,
+      std::min(kMaximumWorkers, available_threads));
+  const int block_size = (count + worker_count - 1) / worker_count;
+  const auto evaluate_block = [&](int begin, int end) {
+    for (int index = begin; index < end; ++index) {
+      values[static_cast<std::size_t>(index)] = function(index);
+    }
+  };
+
+  std::vector<std::future<void>> workers;
+  workers.reserve(static_cast<std::size_t>(worker_count - 1));
+  for (int worker = 1; worker < worker_count; ++worker) {
+    const int begin = worker * block_size;
+    const int end = std::min(count, begin + block_size);
+    if (begin >= end) {
+      break;
+    }
+    try {
+      workers.push_back(std::async(
+          std::launch::async,
+          [&, begin, end]() { evaluate_block(begin, end); }));
+    } catch (const std::system_error&) {
+      evaluate_block(begin, end);
+    }
+  }
+  evaluate_block(0, std::min(count, block_size));
+  for (std::future<void>& worker : workers) {
+    worker.get();
+  }
+  return values;
 }
 
 }  // namespace
@@ -946,6 +1001,8 @@ struct GearGenerator::Impl {
 
     ExactPolygonSet gear;
     gear.insert(make_circle_polygon(blank_radius, 1024));
+    std::vector<ExactPolygon> cutters;
+    cutters.reserve(static_cast<std::size_t>(phase_count));
     for (int index = 0; index < phase_count; ++index) {
       const double fraction =
           static_cast<double>(index) / static_cast<double>(phase_count);
@@ -971,8 +1028,13 @@ struct GearGenerator::Impl {
       if (!cutter.is_simple()) {
         throw std::runtime_error("Generated rack cutter pose is not simple.");
       }
-      gear.difference(cutter);
+      cutters.push_back(cutter);
     }
+    // CGAL's range join uses an aggregate divide-and-conquer overlay. This
+    // avoids overlaying every cutter against an increasingly complex gear.
+    ExactPolygonSet swept_cutters;
+    swept_cutters.join(cutters.begin(), cutters.end());
+    gear.difference(swept_cutters);
 
     if (!is_closed()) {
       double start_angle = 0.0;
@@ -1039,6 +1101,8 @@ struct GearGenerator::Impl {
     gear.insert(make_circle_polygon(blank_radius, 1024));
     const std::vector<Point> master = simplify_closed_for_sweep(
         master_outline, 2e-4 * std::max(1.0, config.module));
+    std::vector<ExactPolygon> cutters;
+    cutters.reserve(static_cast<std::size_t>(phase_count));
 
     for (int index = 0; index < phase_count; ++index) {
       const double fraction =
@@ -1063,8 +1127,11 @@ struct GearGenerator::Impl {
         throw std::runtime_error(
             "Simplified master gear is not a valid conjugate cutter.");
       }
-      gear.difference(cutter);
+      cutters.push_back(cutter);
     }
+    ExactPolygonSet swept_cutters;
+    swept_cutters.join(cutters.begin(), cutters.end());
+    gear.difference(swept_cutters);
 
     if (!is_closed()) {
       const double start_angle =
@@ -1101,20 +1168,24 @@ struct GearGenerator::Impl {
     placed_pair_overlap = 0.0;
     verification_phase_count =
         is_closed() ? std::max(64, 4 * std::max(drive_teeth, driven_teeth)) : 48;
-    for (int index = 0; index < verification_phase_count; ++index) {
-      const double fraction =
-          static_cast<double>(index) /
-          static_cast<double>(verification_phase_count - (is_closed() ? 0 : 1));
-      const double phi = std::lerp(active_start, active_end, fraction);
-      placed_pair_overlap = std::max(
-          placed_pair_overlap,
-          placed_pair_overlap_area(
+    const std::vector<double> phase_overlaps = parallel_values(
+        verification_phase_count,
+        [&](int index) {
+          const double fraction =
+              static_cast<double>(index) /
+              static_cast<double>(
+                  verification_phase_count - (is_closed() ? 0 : 1));
+          const double phi =
+              std::lerp(active_start, active_end, fraction);
+          return placed_pair_overlap_area(
               drive,
               driven,
               center_distance,
               phi - active_start,
-              -(psi(phi) - psi(active_start))));
-    }
+              -(psi(phi) - psi(active_start)));
+        });
+    placed_pair_overlap =
+        *std::max_element(phase_overlaps.begin(), phase_overlaps.end());
     const double tolerance =
         1e-6 * config.module * config.module *
         static_cast<double>(std::max(drive_teeth, driven_teeth));
@@ -1129,68 +1200,75 @@ struct GearGenerator::Impl {
         1e-11 * config.module * config.module;
     maximum_transmission_error = 0.0;
     const int recovery_phase_count = is_closed() ? 6 : 4;
-    for (int index = 0; index < recovery_phase_count; ++index) {
-      const double fraction =
-          (static_cast<double>(index) + 0.37) /
-          static_cast<double>(recovery_phase_count);
-      const double phi = std::lerp(active_start, active_end, fraction);
-      const double drive_angle = phi - active_start;
-      const double desired_driven_angle =
-          -(psi(phi) - psi(active_start));
-      if (placed_pair_overlap_area(
-              drive,
-              driven,
-              center_distance,
-              drive_angle,
-              desired_driven_angle) > contact_area_tolerance) {
-        continue;
-      }
+    const std::vector<double> contact_deltas = parallel_values(
+        recovery_phase_count,
+        [&](int index) {
+          const double fraction =
+              (static_cast<double>(index) + 0.37) /
+              static_cast<double>(recovery_phase_count);
+          const double phi =
+              std::lerp(active_start, active_end, fraction);
+          const double drive_angle = phi - active_start;
+          const double desired_driven_angle =
+              -(psi(phi) - psi(active_start));
+          ExactPolygonSet placed_drive;
+          placed_drive.insert(
+              transform_polygon(drive, drive_angle, 0.0));
+          if (placed_pair_overlap_area(
+                  placed_drive,
+                  driven,
+                  center_distance,
+                  desired_driven_angle) > contact_area_tolerance) {
+            return 0.0;
+          }
 
-      double best_contact_delta = std::numeric_limits<double>::infinity();
-      for (const double direction : {-1.0, 1.0}) {
-        double clear_delta = 0.0;
-        double collision_delta = 1e-5;
-        bool found = false;
-        while (collision_delta <= 0.08) {
-          const double overlap = placed_pair_overlap_area(
-              drive,
-              driven,
-              center_distance,
-              drive_angle,
-              desired_driven_angle + direction * collision_delta);
-          if (overlap > contact_area_tolerance) {
-            found = true;
-            break;
+          double best_contact_delta =
+              std::numeric_limits<double>::infinity();
+          for (const double direction : {-1.0, 1.0}) {
+            double clear_delta = 0.0;
+            double collision_delta = 1e-5;
+            bool found = false;
+            while (collision_delta <= 0.08) {
+              const double overlap = placed_pair_overlap_area(
+                  placed_drive,
+                  driven,
+                  center_distance,
+                  desired_driven_angle + direction * collision_delta);
+              if (overlap > contact_area_tolerance) {
+                found = true;
+                break;
+              }
+              clear_delta = collision_delta;
+              collision_delta *= 2.0;
+            }
+            if (!found) {
+              continue;
+            }
+            for (int iteration = 0; iteration < 16; ++iteration) {
+              const double midpoint =
+                  0.5 * (clear_delta + collision_delta);
+              const double overlap = placed_pair_overlap_area(
+                  placed_drive,
+                  driven,
+                  center_distance,
+                  desired_driven_angle + direction * midpoint);
+              if (overlap > contact_area_tolerance) {
+                collision_delta = midpoint;
+              } else {
+                clear_delta = midpoint;
+              }
+            }
+            best_contact_delta =
+                std::min(best_contact_delta, collision_delta);
           }
-          clear_delta = collision_delta;
-          collision_delta *= 2.0;
-        }
-        if (!found) {
-          continue;
-        }
-        for (int iteration = 0; iteration < 16; ++iteration) {
-          const double midpoint = 0.5 * (clear_delta + collision_delta);
-          const double overlap = placed_pair_overlap_area(
-              drive,
-              driven,
-              center_distance,
-              drive_angle,
-              desired_driven_angle + direction * midpoint);
-          if (overlap > contact_area_tolerance) {
-            collision_delta = midpoint;
-          } else {
-            clear_delta = midpoint;
+          if (!std::isfinite(best_contact_delta)) {
+            throw std::runtime_error(
+                "Finished solids do not establish positive contact near the requested motion.");
           }
-        }
-        best_contact_delta = std::min(best_contact_delta, collision_delta);
-      }
-      if (!std::isfinite(best_contact_delta)) {
-        throw std::runtime_error(
-            "Finished solids do not establish positive contact near the requested motion.");
-      }
-      maximum_transmission_error =
-          std::max(maximum_transmission_error, best_contact_delta);
-    }
+          return best_contact_delta;
+        });
+    maximum_transmission_error =
+        *std::max_element(contact_deltas.begin(), contact_deltas.end());
   }
 
   GenerationResult run(int samples_per_radian) {
@@ -1200,14 +1278,34 @@ struct GearGenerator::Impl {
     measure_centrodes();
     int drive_phases = 0;
     int driven_phases = 0;
-    std::vector<Point> drive =
-        generate_swept_gear(false, samples_per_radian, drive_phases);
-    std::vector<Point> driven =
-        config.profile_family == ProfileFamily::kCycloidalRack
-            ? generate_conjugate_mate(
-                  drive, samples_per_radian, driven_phases)
-            : generate_swept_gear(
+    std::vector<Point> drive;
+    std::vector<Point> driven;
+    if (config.profile_family == ProfileFamily::kCycloidalRack) {
+      drive =
+          generate_swept_gear(false, samples_per_radian, drive_phases);
+      driven = generate_conjugate_mate(
+          drive, samples_per_radian, driven_phases);
+    } else {
+      std::future<std::vector<Point>> driven_generation;
+      try {
+        driven_generation = std::async(
+            std::launch::async,
+            [this, samples_per_radian, &driven_phases]() {
+              return generate_swept_gear(
                   true, samples_per_radian, driven_phases);
+            });
+      } catch (const std::system_error&) {
+        drive =
+            generate_swept_gear(false, samples_per_radian, drive_phases);
+        driven =
+            generate_swept_gear(true, samples_per_radian, driven_phases);
+      }
+      if (driven_generation.valid()) {
+        drive =
+            generate_swept_gear(false, samples_per_radian, drive_phases);
+        driven = driven_generation.get();
+      }
+    }
     if (!is_simple_closed_polygon(drive) || !is_simple_closed_polygon(driven)) {
       throw std::runtime_error(
           "Swept cutter did not produce simple hub-connected gear outlines.");

@@ -7,12 +7,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(CGAL REQUIRED)
+find_package(Threads REQUIRED)
 
 add_library(ncgear
   src/gear.cpp
 )
 target_include_directories(ncgear PUBLIC include)
-target_link_libraries(ncgear PUBLIC CGAL::CGAL)
+target_link_libraries(ncgear PUBLIC CGAL::CGAL Threads::Threads)
 
 add_executable(ncgear_generate src/main.cpp)
 target_link_libraries(ncgear_generate PRIVATE ncgear)
@@ -27,4 +28,3 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "AppleClang|Clang|GNU")
   target_compile_options(ncgear_generate PRIVATE -Wall -Wextra -Wpedantic -Wconversion)
   target_compile_options(ncgear_tests PRIVATE -Wall -Wextra -Wpedantic -Wconversion)
 endif()
-
