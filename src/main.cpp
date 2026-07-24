@@ -8,6 +8,7 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -20,7 +21,7 @@ void usage() {
          "       ncgear_generate --transmission-csv FILE [--open] --name NAME "
          "--teeth N --module M --domain-start A --domain-end B "
          "[--active-start A --active-end B] [--period P --cycle-delta D] "
-         "[--allow-nonconvex]\n";
+         "[--profile involute|cycloidal] [--cycloidal-rolling-factor F]\n";
 }
 
 ncgear::TransmissionSamples read_transmission_csv(
@@ -82,6 +83,9 @@ int main(int argc, char** argv) {
     double cycle_delta = 2.0 * ncgear::kPi;
     bool open = false;
     bool allow_nonconvex = false;
+    ncgear::ProfileFamily profile_family =
+        ncgear::ProfileFamily::kInvoluteRack;
+    double cycloidal_rolling_factor = 0.35;
 
     for (int i = 1; i < argc; ++i) {
       const std::string argument = argv[i];
@@ -123,6 +127,19 @@ int main(int argc, char** argv) {
         open = true;
       } else if (argument == "--allow-nonconvex") {
         allow_nonconvex = true;
+      } else if (argument == "--profile" && i + 1 < argc) {
+        const std::string profile = argv[++i];
+        if (profile == "involute") {
+          profile_family = ncgear::ProfileFamily::kInvoluteRack;
+        } else if (profile == "cycloidal") {
+          profile_family = ncgear::ProfileFamily::kCycloidalRack;
+        } else {
+          throw std::invalid_argument(
+              "--profile must be involute or cycloidal.");
+        }
+      } else if (
+          argument == "--cycloidal-rolling-factor" && i + 1 < argc) {
+        cycloidal_rolling_factor = std::stod(argv[++i]);
       } else if (argument == "--samples-per-radian" && i + 1 < argc) {
         samples_per_radian = std::stoi(argv[++i]);
       } else if (argument == "--help" || argument == "-h") {
@@ -154,6 +171,8 @@ int main(int argc, char** argv) {
       config.transmission.period = period;
       config.transmission.cycle_delta = cycle_delta;
       config.allow_nonconvex_centrodes = allow_nonconvex;
+      config.profile_family = profile_family;
+      config.cycloidal_rolling_factor = cycloidal_rolling_factor;
       samples.push_back(std::move(config));
     } else if (sample_name == "all") {
       samples = ncgear::builtin_samples();
@@ -183,7 +202,17 @@ int main(int argc, char** argv) {
                 << "  max drive curvature: "
                 << result.maximum_drive_curvature << "\n"
                 << "  min driven curvature: "
-                << result.minimum_driven_curvature << "\n";
+                << result.minimum_driven_curvature << "\n"
+                << "  cutter sweep phases: "
+                << result.cutter_sweep_phase_count << "\n"
+                << "  verification phases: "
+                << result.verification_phase_count << "\n"
+                << "  recovered maximum transmission error: "
+                << result.maximum_transmission_error << " rad\n"
+                << "  maximum sliding velocity factor: "
+                << result.maximum_sliding_velocity_factor << "\n"
+                << "  minimum root radius: "
+                << result.minimum_root_radius << "\n";
     }
     return EXIT_SUCCESS;
   } catch (const std::exception& error) {

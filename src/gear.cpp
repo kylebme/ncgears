@@ -1,36 +1,36 @@
 #include "ncgear/gear.hpp"
 
+#include <CGAL/Exact_predicates_exact_constructions_kernel.h>
 #include <CGAL/Polygon_2.h>
 #include <CGAL/Polygon_set_2.h>
-#include <CGAL/Exact_predicates_exact_constructions_kernel.h>
-#include <CGAL/intersections.h>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <complex>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iomanip>
 #include <limits>
 #include <list>
+#include <numeric>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace ncgear {
 namespace {
 
 using Complex = std::complex<double>;
-using Segment = Kernel::Segment_2;
+using ExactKernel = CGAL::Exact_predicates_exact_constructions_kernel;
+using ExactPoint = ExactKernel::Point_2;
+using ExactPolygon = CGAL::Polygon_2<ExactKernel>;
+using ExactPolygonSet = CGAL::Polygon_set_2<ExactKernel>;
+using ExactPolygonWithHoles = CGAL::Polygon_with_holes_2<ExactKernel>;
 using ScalarFunction = std::function<double(double)>;
-using CurveFunction = std::function<Complex(double)>;
-
-enum class Flank : int {
-  kMinus = -1,
-  kPlus = 1,
-};
 
 constexpr std::array<double, 8> kGaussNodes = {
     -0.9602898564975363,
@@ -54,52 +54,36 @@ constexpr std::array<double, 8> kGaussWeights = {
     0.1012285362903763,
 };
 
-double flank_sign(Flank flank) {
-  return static_cast<double>(static_cast<int>(flank));
-}
-
 Complex cis(double angle) {
   return {std::cos(angle), std::sin(angle)};
 }
 
-Point to_point(const Complex& value) {
+ExactPoint to_exact_point(const Complex& value) {
   return {value.real(), value.imag()};
 }
 
 double point_distance(const Point& lhs, const Point& rhs) {
-  const double dx = lhs.x() - rhs.x();
-  const double dy = lhs.y() - rhs.y();
-  return std::hypot(dx, dy);
+  return std::hypot(lhs.x() - rhs.x(), lhs.y() - rhs.y());
 }
 
-double project_fraction(const Point& start, const Point& end, const Point& point) {
-  const double dx = end.x() - start.x();
-  const double dy = end.y() - start.y();
-  const double denominator = dx * dx + dy * dy;
-  if (denominator <= 0.0) {
+double integrate_gauss8(
+    const ScalarFunction& function,
+    double start,
+    double end) {
+  if (start == end) {
     return 0.0;
   }
-  const double numerator =
-      (point.x() - start.x()) * dx + (point.y() - start.y()) * dy;
-  return std::clamp(numerator / denominator, 0.0, 1.0);
-}
-
-double oriented_sign(double value, double fallback) {
-  if (std::abs(value) < 1e-12) {
-    return fallback;
+  if (end < start) {
+    return -integrate_gauss8(function, end, start);
   }
-  return value < 0.0 ? -1.0 : 1.0;
-}
-
-std::string json_escape(const std::string& value) {
-  std::ostringstream output;
-  for (const char character : value) {
-    if (character == '"' || character == '\\') {
-      output << '\\';
-    }
-    output << character;
+  const double midpoint = 0.5 * (start + end);
+  const double radius = 0.5 * (end - start);
+  double sum = 0.0;
+  for (std::size_t index = 0; index < kGaussNodes.size(); ++index) {
+    sum +=
+        kGaussWeights[index] * function(midpoint + radius * kGaussNodes[index]);
   }
-  return output.str();
+  return radius * sum;
 }
 
 class IntegralTable {
@@ -109,7 +93,7 @@ class IntegralTable {
       double domain_start,
       double domain_end,
       bool periodic,
-      int interval_count = 1 << 14)
+      int interval_count = 1 << 15)
       : function_(std::move(function)),
         domain_start_(domain_start),
         domain_end_(domain_end),
@@ -122,13 +106,10 @@ class IntegralTable {
     for (int index = 0; index < interval_count; ++index) {
       const double start = domain_start_ + static_cast<double>(index) * step_;
       prefix_[static_cast<std::size_t>(index + 1)] =
-          prefix_[static_cast<std::size_t>(index)] + integrate_small(start, start + step_);
+          prefix_[static_cast<std::size_t>(index)] +
+          integrate_gauss8(function_, start, start + step_);
     }
     domain_integral_ = prefix_.back();
-  }
-
-  double domain_integral() const {
-    return domain_integral_;
   }
 
   double integral(double start, double end) const {
@@ -136,42 +117,34 @@ class IntegralTable {
   }
 
  private:
-  double integrate_small(double start, double end) const {
-    const double midpoint = 0.5 * (start + end);
-    const double radius = 0.5 * (end - start);
-    double sum = 0.0;
-    for (std::size_t index = 0; index < kGaussNodes.size(); ++index) {
-      sum +=
-          kGaussWeights[index] * function_(midpoint + radius * kGaussNodes[index]);
-    }
-    return radius * sum;
-  }
-
   double antiderivative(double value) const {
     double cycles = 0.0;
     double wrapped = value;
-    const double domain_length = domain_end_ - domain_start_;
+    const double length = domain_end_ - domain_start_;
     if (periodic_) {
-      cycles = std::floor((value - domain_start_) / domain_length);
-      wrapped = value - cycles * domain_length;
+      cycles = std::floor((value - domain_start_) / length);
+      wrapped = value - cycles * length;
       if (wrapped < domain_start_) {
-        wrapped += domain_length;
+        wrapped += length;
       } else if (wrapped >= domain_end_) {
-        wrapped -= domain_length;
+        wrapped -= length;
       }
     } else {
       if (value < domain_start_ - 1e-10 || value > domain_end_ + 1e-10) {
-        throw std::out_of_range("Integral query is outside the sampled transmission domain.");
+        throw std::out_of_range("Integral query is outside the motion domain.");
       }
       wrapped = std::clamp(value, domain_start_, domain_end_);
     }
+
     const int interval = std::clamp(
         static_cast<int>(std::floor((wrapped - domain_start_) / step_)),
         0,
         static_cast<int>(prefix_.size()) - 2);
-    const double interval_start = domain_start_ + static_cast<double>(interval) * step_;
-    return cycles * domain_integral_ + prefix_[static_cast<std::size_t>(interval)] +
-           integrate_small(interval_start, wrapped);
+    const double interval_start =
+        domain_start_ + static_cast<double>(interval) * step_;
+    return cycles * domain_integral_ +
+           prefix_[static_cast<std::size_t>(interval)] +
+           integrate_gauss8(function_, interval_start, wrapped);
   }
 
   ScalarFunction function_;
@@ -183,338 +156,371 @@ class IntegralTable {
   std::vector<double> prefix_;
 };
 
-struct CurveIntersection {
-  double lhs = 0.0;
-  double rhs = 0.0;
-  Complex point{0.0, 0.0};
-  double residual = std::numeric_limits<double>::infinity();
-};
+class MotionLaw {
+ public:
+  explicit MotionLaw(const SampleConfig& config)
+      : config_(config),
+        sampled_(!config.transmission.psi.empty()),
+        closed_(config.topology == GearTopology::kClosed) {}
 
-struct DriveGeometry {
-  double minus_fillet_transition = 0.0;
-  double minus_flank_transition = 0.0;
-  double minus_fillet_dedendum = 0.0;
-  double minus_flank_addendum = 0.0;
-  double minus_addendum = 0.0;
-  double plus_addendum = 0.0;
-  double plus_flank_addendum = 0.0;
-  double plus_flank_transition = 0.0;
-  double plus_fillet_transition = 0.0;
-  double plus_fillet_dedendum = 0.0;
-};
-
-struct DrivenGeometry {
-  double minus_flank_addendum = 0.0;
-  double minus_addendum = 0.0;
-  double minus_flank_transition = 0.0;
-  double minus_fillet_transition = 0.0;
-  double minus_fillet_dedendum = 0.0;
-  double plus_fillet_dedendum = 0.0;
-  double plus_fillet_transition = 0.0;
-  double plus_flank_transition = 0.0;
-  double plus_flank_addendum = 0.0;
-  double plus_addendum = 0.0;
-};
-
-struct SampledPoint {
-  double parameter = 0.0;
-  Point point{0.0, 0.0};
-};
-
-std::vector<double> find_roots(
-    const ScalarFunction& function,
-    double low,
-    double high,
-    int samples) {
-  std::vector<double> roots;
-  double previous_x = low;
-  double previous_value = function(previous_x);
-  const double step = (high - low) / static_cast<double>(samples);
-
-  auto add_root = [&roots](double root) {
-    if (roots.empty() || std::abs(roots.back() - root) > 1e-8) {
-      roots.push_back(root);
+  double value(double phi, int derivative) const {
+    if (!sampled_) {
+      return analytic(phi, derivative);
     }
-  };
+    return quintic(phi, derivative);
+  }
 
-  for (int index = 1; index <= samples; ++index) {
-    const double current_x =
-        index == samples ? high : low + static_cast<double>(index) * step;
-    const double current_value = function(current_x);
-    if (!std::isfinite(previous_value) || !std::isfinite(current_value)) {
-      previous_x = current_x;
-      previous_value = current_value;
-      continue;
+ private:
+  double analytic(double phi, int derivative) const {
+    double result = derivative == 0 ? phi : derivative == 1 ? 1.0 : 0.0;
+    for (const Harmonic& harmonic : config_.harmonics) {
+      const double order = static_cast<double>(harmonic.order);
+      const double phase = order * phi +
+                           static_cast<double>(derivative) * 0.5 * kPi;
+      result += harmonic.amplitude * std::pow(order, derivative) *
+                std::sin(phase);
     }
-    if (std::abs(previous_value) < 1e-12) {
-      add_root(previous_x);
-    }
-    if ((previous_value < 0.0 && current_value > 0.0) ||
-        (previous_value > 0.0 && current_value < 0.0)) {
-      double left = previous_x;
-      double right = current_x;
-      double left_value = previous_value;
-      for (int iteration = 0; iteration < 90; ++iteration) {
-        const double midpoint = 0.5 * (left + right);
-        const double midpoint_value = function(midpoint);
-        if (std::abs(midpoint_value) < 1e-14 || right - left < 1e-13) {
-          left = midpoint;
-          right = midpoint;
-          break;
-        }
-        if ((left_value < 0.0 && midpoint_value > 0.0) ||
-            (left_value > 0.0 && midpoint_value < 0.0)) {
-          right = midpoint;
-        } else {
-          left = midpoint;
-          left_value = midpoint_value;
-        }
+    return result;
+  }
+
+  double quintic(double phi, int derivative) const {
+    const TransmissionSamples& samples = config_.transmission;
+    const std::size_t count = samples.psi.size();
+    const double domain_length = samples.domain_end - samples.domain_start;
+    const double interpolation_length = closed_ ? samples.period : domain_length;
+    const double step =
+        closed_ ? interpolation_length / static_cast<double>(count)
+                : interpolation_length / static_cast<double>(count - 1);
+
+    double cycles = 0.0;
+    double x = phi;
+    if (closed_) {
+      cycles = std::floor((phi - samples.domain_start) / samples.period);
+      x = phi - cycles * samples.period;
+      if (x < samples.domain_start) {
+        x += samples.period;
+      } else if (x >= samples.domain_start + samples.period) {
+        x -= samples.period;
       }
-      add_root(0.5 * (left + right));
+    } else {
+      x = std::clamp(x, samples.domain_start, samples.domain_end);
     }
-    previous_x = current_x;
-    previous_value = current_value;
+
+    const double scaled = (x - samples.domain_start) / step;
+    int index = static_cast<int>(std::floor(scaled));
+    double t = scaled - static_cast<double>(index);
+    if (!closed_ && index >= static_cast<int>(count) - 1) {
+      index = static_cast<int>(count) - 2;
+      t = 1.0;
+    }
+    index = std::clamp(index, 0, static_cast<int>(count) - 1);
+    const int next =
+        closed_ ? (index + 1) % static_cast<int>(count) : index + 1;
+
+    const double y0 = samples.psi[static_cast<std::size_t>(index)];
+    double y1 = samples.psi[static_cast<std::size_t>(next)];
+    if (closed_ && next == 0) {
+      y1 += samples.cycle_delta;
+    }
+    const double d0 = samples.psi1[static_cast<std::size_t>(index)];
+    const double d1 = samples.psi1[static_cast<std::size_t>(next)];
+    const double dd0 = samples.psi2[static_cast<std::size_t>(index)];
+    const double dd1 = samples.psi2[static_cast<std::size_t>(next)];
+
+    const double a0 = y0;
+    const double a1 = step * d0;
+    const double a2 = 0.5 * step * step * dd0;
+    const double endpoint_value_error = y1 - (a0 + a1 + a2);
+    const double endpoint_slope_error = step * d1 - (a1 + 2.0 * a2);
+    const double endpoint_curvature_error =
+        step * step * dd1 - 2.0 * a2;
+    const double a3 =
+        10.0 * endpoint_value_error - 4.0 * endpoint_slope_error +
+        0.5 * endpoint_curvature_error;
+    const double a4 =
+        -15.0 * endpoint_value_error + 7.0 * endpoint_slope_error -
+        endpoint_curvature_error;
+    const double a5 =
+        6.0 * endpoint_value_error - 3.0 * endpoint_slope_error +
+        0.5 * endpoint_curvature_error;
+
+    double result = 0.0;
+    if (derivative == 0) {
+      result =
+          a0 + t * (a1 + t * (a2 + t * (a3 + t * (a4 + t * a5))));
+      result += cycles * samples.cycle_delta;
+    } else if (derivative == 1) {
+      result =
+          (a1 + t * (2.0 * a2 +
+                     t * (3.0 * a3 + t * (4.0 * a4 + t * 5.0 * a5)))) /
+          step;
+    } else if (derivative == 2) {
+      result =
+          (2.0 * a2 +
+           t * (6.0 * a3 + t * (12.0 * a4 + t * 20.0 * a5))) /
+          (step * step);
+    } else if (derivative == 3) {
+      result =
+          (6.0 * a3 + t * (24.0 * a4 + t * 60.0 * a5)) /
+          (step * step * step);
+    } else {
+      throw std::invalid_argument("Motion derivative order must be between 0 and 3.");
+    }
+    return result;
   }
-  if (std::abs(previous_value) < 1e-12) {
-    add_root(high);
+
+  const SampleConfig& config_;
+  bool sampled_ = false;
+  bool closed_ = true;
+};
+
+std::string json_escape(const std::string& value) {
+  std::ostringstream output;
+  for (const char character : value) {
+    if (character == '"' || character == '\\') {
+      output << '\\';
+    }
+    output << character;
   }
-  return roots;
+  return output.str();
 }
 
-double choose_directional_root(
-    const ScalarFunction& function,
-    double reference,
-    int direction,
-    double span) {
-  for (const double multiplier : {1.0, 1.5, 2.0}) {
-    const double low = reference - span * multiplier;
-    const double high = reference + span * multiplier;
-    const std::vector<double> roots = find_roots(function, low, high, 4096);
-    std::optional<double> best;
-    for (const double root : roots) {
-      const bool correct_side =
-          direction < 0 ? root < reference - 1e-8 : root > reference + 1e-8;
-      if (!correct_side) {
-        continue;
-      }
-      if (!best || std::abs(root - reference) < std::abs(*best - reference)) {
-        best = root;
-      }
-    }
-    if (best) {
-      return *best;
-    }
+double exact_component_area(const ExactPolygonWithHoles& component) {
+  ExactKernel::FT area = CGAL::abs(component.outer_boundary().area());
+  for (auto hole = component.holes_begin(); hole != component.holes_end(); ++hole) {
+    area -= CGAL::abs(hole->area());
   }
-  throw std::runtime_error("Unable to bracket a required directional root.");
+  return CGAL::to_double(area);
 }
 
-CurveIntersection refine_intersection(
-    const CurveFunction& lhs,
-    double lhs_low,
-    double lhs_high,
-    const CurveFunction& rhs,
-    double rhs_low,
-    double rhs_high,
-    double lhs_guess,
-    double rhs_guess) {
-  double lhs_parameter = std::clamp(lhs_guess, lhs_low, lhs_high);
-  double rhs_parameter = std::clamp(rhs_guess, rhs_low, rhs_high);
-
-  for (int iteration = 0; iteration < 60; ++iteration) {
-    const Complex difference = lhs(lhs_parameter) - rhs(rhs_parameter);
-    const double residual = std::abs(difference);
-    if (residual < 1e-11) {
-      return {
-          lhs_parameter,
-          rhs_parameter,
-          0.5 * (lhs(lhs_parameter) + rhs(rhs_parameter)),
-          residual,
-      };
-    }
-
-    const double lhs_step = std::max(1e-7, 1e-6 * std::abs(lhs_high - lhs_low));
-    const double rhs_step = std::max(1e-7, 1e-6 * std::abs(rhs_high - rhs_low));
-    const Complex lhs_derivative =
-        (lhs(lhs_parameter + lhs_step) - lhs(lhs_parameter - lhs_step)) /
-        (2.0 * lhs_step);
-    const Complex rhs_derivative =
-        (rhs(rhs_parameter + rhs_step) - rhs(rhs_parameter - rhs_step)) /
-        (2.0 * rhs_step);
-
-    const double a = lhs_derivative.real();
-    const double b = -rhs_derivative.real();
-    const double c = lhs_derivative.imag();
-    const double d = -rhs_derivative.imag();
-    const double determinant = a * d - b * c;
-    if (std::abs(determinant) < 1e-14) {
-      break;
-    }
-
-    const double delta_lhs =
-        (-difference.real() * d + b * difference.imag()) / determinant;
-    const double delta_rhs =
-        (-a * difference.imag() + difference.real() * c) / determinant;
-
-    double damping = 1.0;
-    bool accepted = false;
-    while (damping >= 1.0 / 1024.0) {
-      const double candidate_lhs =
-          std::clamp(lhs_parameter + damping * delta_lhs, lhs_low, lhs_high);
-      const double candidate_rhs =
-          std::clamp(rhs_parameter + damping * delta_rhs, rhs_low, rhs_high);
-      if (std::abs(lhs(candidate_lhs) - rhs(candidate_rhs)) < residual) {
-        lhs_parameter = candidate_lhs;
-        rhs_parameter = candidate_rhs;
-        accepted = true;
-        break;
-      }
-      damping *= 0.5;
-    }
-    if (!accepted) {
-      break;
-    }
+ExactPolygon make_circle_polygon(double radius, int point_count) {
+  ExactPolygon polygon;
+  for (int index = 0; index < point_count; ++index) {
+    const double angle =
+        2.0 * kPi * static_cast<double>(index) /
+        static_cast<double>(point_count);
+    polygon.push_back(ExactPoint(radius * std::cos(angle), radius * std::sin(angle)));
   }
-
-  const Complex lhs_point = lhs(lhs_parameter);
-  const Complex rhs_point = rhs(rhs_parameter);
-  return {
-      lhs_parameter,
-      rhs_parameter,
-      0.5 * (lhs_point + rhs_point),
-      std::abs(lhs_point - rhs_point),
-  };
+  return polygon;
 }
 
-std::vector<CurveIntersection> find_curve_intersections(
-    const CurveFunction& lhs,
-    double lhs_low,
-    double lhs_high,
-    const CurveFunction& rhs,
-    double rhs_low,
-    double rhs_high,
-    int sample_count = 320) {
-  std::vector<SampledPoint> lhs_points;
-  std::vector<SampledPoint> rhs_points;
-  lhs_points.reserve(static_cast<std::size_t>(sample_count + 1));
-  rhs_points.reserve(static_cast<std::size_t>(sample_count + 1));
+ExactPolygon make_open_sector(
+    double start_angle,
+    double end_angle,
+    double inner_radius,
+    double outer_radius) {
+  const double span = end_angle - start_angle;
+  const int arc_count =
+      std::max(16, static_cast<int>(std::ceil(std::abs(span) * 160.0)));
+  ExactPolygon polygon;
+  for (int index = 0; index <= arc_count; ++index) {
+    const double fraction =
+        static_cast<double>(index) / static_cast<double>(arc_count);
+    const double angle = std::lerp(start_angle, end_angle, fraction);
+    polygon.push_back(
+        ExactPoint(outer_radius * std::cos(angle), outer_radius * std::sin(angle)));
+  }
+  for (int index = arc_count; index >= 0; --index) {
+    const double fraction =
+        static_cast<double>(index) / static_cast<double>(arc_count);
+    const double angle = std::lerp(start_angle, end_angle, fraction);
+    polygon.push_back(
+        ExactPoint(inner_radius * std::cos(angle), inner_radius * std::sin(angle)));
+  }
+  if (polygon.orientation() == CGAL::CLOCKWISE) {
+    polygon.reverse_orientation();
+  }
+  return polygon;
+}
 
-  for (int index = 0; index <= sample_count; ++index) {
-    const double fraction = static_cast<double>(index) / static_cast<double>(sample_count);
-    const double lhs_parameter = std::lerp(lhs_low, lhs_high, fraction);
-    const double rhs_parameter = std::lerp(rhs_low, rhs_high, fraction);
-    lhs_points.push_back({lhs_parameter, to_point(lhs(lhs_parameter))});
-    rhs_points.push_back({rhs_parameter, to_point(rhs(rhs_parameter))});
+std::vector<Point> simplify_outline(
+    const ExactPolygon& polygon,
+    double tolerance) {
+  std::vector<Point> points;
+  points.reserve(polygon.size() + 1);
+  for (const ExactPoint& point : polygon) {
+    const Point converted(CGAL::to_double(point.x()), CGAL::to_double(point.y()));
+    if (points.empty() || point_distance(points.back(), converted) > tolerance * 0.05) {
+      points.push_back(converted);
+    }
   }
 
-  std::vector<CurveIntersection> intersections;
-  for (int lhs_index = 0; lhs_index < sample_count; ++lhs_index) {
-    const Segment lhs_segment(
-        lhs_points[static_cast<std::size_t>(lhs_index)].point,
-        lhs_points[static_cast<std::size_t>(lhs_index + 1)].point);
-    for (int rhs_index = 0; rhs_index < sample_count; ++rhs_index) {
-      const Segment rhs_segment(
-          rhs_points[static_cast<std::size_t>(rhs_index)].point,
-          rhs_points[static_cast<std::size_t>(rhs_index + 1)].point);
-      if (!CGAL::do_intersect(lhs_segment, rhs_segment)) {
-        continue;
-      }
-      const auto result = CGAL::intersection(lhs_segment, rhs_segment);
-      if (!result) {
-        continue;
-      }
-
-      Point intersection_point;
-      if (const Point* point = std::get_if<Point>(&*result)) {
-        intersection_point = *point;
-      } else if (const Segment* overlap = std::get_if<Segment>(&*result)) {
-        intersection_point = CGAL::midpoint(overlap->source(), overlap->target());
+  bool changed = true;
+  while (changed && points.size() > 3) {
+    changed = false;
+    std::vector<Point> filtered;
+    filtered.reserve(points.size());
+    for (std::size_t index = 0; index < points.size(); ++index) {
+      const Point& previous =
+          points[(index + points.size() - 1) % points.size()];
+      const Point& current = points[index];
+      const Point& next = points[(index + 1) % points.size()];
+      const double ax = current.x() - previous.x();
+      const double ay = current.y() - previous.y();
+      const double bx = next.x() - current.x();
+      const double by = next.y() - current.y();
+      const double lengths = std::hypot(ax, ay) + std::hypot(bx, by);
+      const double twice_area = std::abs(ax * by - ay * bx);
+      const bool forward = ax * bx + ay * by >= 0.0;
+      if (forward && lengths > 0.0 && twice_area / lengths < tolerance * 0.02) {
+        changed = true;
       } else {
-        continue;
-      }
-
-      const auto& lhs_start = lhs_points[static_cast<std::size_t>(lhs_index)];
-      const auto& lhs_end = lhs_points[static_cast<std::size_t>(lhs_index + 1)];
-      const auto& rhs_start = rhs_points[static_cast<std::size_t>(rhs_index)];
-      const auto& rhs_end = rhs_points[static_cast<std::size_t>(rhs_index + 1)];
-      const double lhs_fraction =
-          project_fraction(lhs_start.point, lhs_end.point, intersection_point);
-      const double rhs_fraction =
-          project_fraction(rhs_start.point, rhs_end.point, intersection_point);
-      const double lhs_guess = std::lerp(lhs_start.parameter, lhs_end.parameter, lhs_fraction);
-      const double rhs_guess = std::lerp(rhs_start.parameter, rhs_end.parameter, rhs_fraction);
-      CurveIntersection refined = refine_intersection(
-          lhs,
-          lhs_low,
-          lhs_high,
-          rhs,
-          rhs_low,
-          rhs_high,
-          lhs_guess,
-          rhs_guess);
-      if (refined.residual > 1e-7) {
-        continue;
-      }
-
-      const bool duplicate = std::any_of(
-          intersections.begin(),
-          intersections.end(),
-          [&refined](const CurveIntersection& existing) {
-            return std::abs(existing.lhs - refined.lhs) < 1e-5 &&
-                   std::abs(existing.rhs - refined.rhs) < 1e-5;
-          });
-      if (!duplicate) {
-        intersections.push_back(refined);
+        filtered.push_back(current);
       }
     }
+    points = std::move(filtered);
   }
-  return intersections;
+
+  if (points.size() < 3) {
+    throw std::runtime_error("Swept cutter left fewer than three boundary points.");
+  }
+  points.push_back(points.front());
+  return points;
 }
 
-template <typename Predicate, typename Score>
-CurveIntersection choose_intersection(
-    const std::vector<CurveIntersection>& intersections,
-    Predicate predicate,
-    Score score,
-    const std::string& label) {
-  const CurveIntersection* best = nullptr;
-  double best_score = std::numeric_limits<double>::infinity();
-  for (const auto& intersection : intersections) {
-    if (!predicate(intersection)) {
+double point_segment_distance(
+    const Point& point,
+    const Point& start,
+    const Point& end) {
+  const double dx = end.x() - start.x();
+  const double dy = end.y() - start.y();
+  const double denominator = dx * dx + dy * dy;
+  if (denominator <= 0.0) {
+    return point_distance(point, start);
+  }
+  const double fraction = std::clamp(
+      ((point.x() - start.x()) * dx + (point.y() - start.y()) * dy) /
+          denominator,
+      0.0,
+      1.0);
+  return std::hypot(
+      point.x() - std::lerp(start.x(), end.x(), fraction),
+      point.y() - std::lerp(start.y(), end.y(), fraction));
+}
+
+void simplify_chain_recursive(
+    const std::vector<Point>& points,
+    std::size_t first,
+    std::size_t last,
+    double tolerance,
+    std::vector<bool>& keep) {
+  if (last <= first + 1) {
+    return;
+  }
+  double maximum_distance = 0.0;
+  std::size_t maximum_index = first;
+  for (std::size_t index = first + 1; index < last; ++index) {
+    const double distance =
+        point_segment_distance(points[index], points[first], points[last]);
+    if (distance > maximum_distance) {
+      maximum_distance = distance;
+      maximum_index = index;
+    }
+  }
+  if (maximum_distance <= tolerance) {
+    return;
+  }
+  keep[maximum_index] = true;
+  simplify_chain_recursive(points, first, maximum_index, tolerance, keep);
+  simplify_chain_recursive(points, maximum_index, last, tolerance, keep);
+}
+
+std::vector<Point> simplify_closed_for_sweep(
+    const std::vector<Point>& closed,
+    double tolerance) {
+  const std::size_t count = closed.size() - 1;
+  std::size_t split = 1;
+  double split_distance = 0.0;
+  for (std::size_t index = 1; index < count; ++index) {
+    const double distance = point_distance(closed.front(), closed[index]);
+    if (distance > split_distance) {
+      split_distance = distance;
+      split = index;
+    }
+  }
+  std::vector<bool> keep(count, false);
+  keep[0] = true;
+  keep[split] = true;
+  simplify_chain_recursive(closed, 0, split, tolerance, keep);
+
+  std::vector<Point> wrapped;
+  wrapped.reserve(count - split + 1);
+  for (std::size_t index = split; index < count; ++index) {
+    wrapped.push_back(closed[index]);
+  }
+  wrapped.push_back(closed.front());
+  std::vector<bool> wrapped_keep(wrapped.size(), false);
+  wrapped_keep.front() = true;
+  wrapped_keep.back() = true;
+  simplify_chain_recursive(
+      wrapped, 0, wrapped.size() - 1, tolerance, wrapped_keep);
+  for (std::size_t index = 1; index + 1 < wrapped.size(); ++index) {
+    if (wrapped_keep[index]) {
+      keep[split + index] = true;
+    }
+  }
+
+  std::vector<Point> result;
+  for (std::size_t index = 0; index < count; ++index) {
+    if (keep[index]) {
+      result.push_back(closed[index]);
+    }
+  }
+  result.push_back(result.front());
+  return result;
+}
+
+ExactPolygon transform_rack_polygon(
+    const std::vector<Complex>& local,
+    const Complex& pitch_point,
+    const Complex& tangent,
+    const Complex& outward_normal) {
+  ExactPolygon polygon;
+  std::optional<Complex> previous;
+  for (const Complex& point : local) {
+    if (previous && std::abs(point - *previous) <= 1e-12) {
       continue;
     }
-    const double candidate_score = score(intersection);
-    if (candidate_score < best_score) {
-      best = &intersection;
-      best_score = candidate_score;
-    }
+    polygon.push_back(to_exact_point(
+        pitch_point + point.real() * tangent + point.imag() * outward_normal));
+    previous = point;
   }
-  if (best == nullptr) {
-    throw std::runtime_error("No valid CGAL intersection found for " + label + ".");
+  if (polygon.orientation() == CGAL::CLOCKWISE) {
+    polygon.reverse_orientation();
   }
-  return *best;
+  return polygon;
 }
 
-std::string self_intersection_description(const std::vector<Point>& points) {
-  if (points.size() < 4) {
-    return "too few points";
+ExactPolygon transform_polygon(
+    const std::vector<Point>& points,
+    double angle,
+    double translate_x) {
+  ExactPolygon polygon;
+  const double cosine = std::cos(angle);
+  const double sine = std::sin(angle);
+  for (std::size_t index = 0; index + 1 < points.size(); ++index) {
+    const double x =
+        cosine * points[index].x() - sine * points[index].y() + translate_x;
+    const double y =
+        sine * points[index].x() + cosine * points[index].y();
+    polygon.push_back(ExactPoint(x, y));
   }
-  const std::size_t segment_count = points.size() - 1;
-  for (std::size_t lhs = 0; lhs < segment_count; ++lhs) {
-    const Segment lhs_segment(points[lhs], points[lhs + 1]);
-    for (std::size_t rhs = lhs + 1; rhs < segment_count; ++rhs) {
-      const bool adjacent = rhs == lhs + 1 || (lhs == 0 && rhs + 1 == segment_count);
-      if (adjacent) {
-        continue;
-      }
-      const Segment rhs_segment(points[rhs], points[rhs + 1]);
-      if (CGAL::do_intersect(lhs_segment, rhs_segment)) {
-        std::ostringstream message;
-        message << "segments " << lhs << " and " << rhs;
-        return message.str();
-      }
-    }
+  if (polygon.orientation() == CGAL::CLOCKWISE) {
+    polygon.reverse_orientation();
   }
-  return "CGAL Polygon_2 rejected the outline without a nonadjacent segment crossing";
+  return polygon;
+}
+
+double polygon_set_area(const ExactPolygonSet& set) {
+  std::list<ExactPolygonWithHoles> components;
+  set.polygons_with_holes(std::back_inserter(components));
+  return std::accumulate(
+      components.begin(),
+      components.end(),
+      0.0,
+      [](double value, const ExactPolygonWithHoles& component) {
+        return value + exact_component_area(component);
+      });
 }
 
 double placed_pair_overlap_area(
@@ -523,49 +529,14 @@ double placed_pair_overlap_area(
     double center_distance,
     double drive_angle,
     double driven_angle) {
-  using ExactKernel = CGAL::Exact_predicates_exact_constructions_kernel;
-  using ExactPoint = ExactKernel::Point_2;
-  using ExactPolygon = CGAL::Polygon_2<ExactKernel>;
-  using ExactPolygonSet = CGAL::Polygon_set_2<ExactKernel>;
-  using ExactPolygonWithHoles = CGAL::Polygon_with_holes_2<ExactKernel>;
-
-  auto make_polygon = [](
-                          const std::vector<Point>& points,
-                          double angle,
-                          double translate_x) {
-    ExactPolygon polygon;
-    const double cosine = std::cos(angle);
-    const double sine = std::sin(angle);
-    for (std::size_t index = 0; index + 1 < points.size(); ++index) {
-      const double x =
-          cosine * points[index].x() - sine * points[index].y() + translate_x;
-      const double y =
-          sine * points[index].x() + cosine * points[index].y();
-      polygon.push_back(ExactPoint(x, y));
-    }
-    if (polygon.orientation() == CGAL::CLOCKWISE) {
-      polygon.reverse_orientation();
-    }
-    return polygon;
-  };
-
-  const ExactPolygon drive_polygon = make_polygon(drive, drive_angle, 0.0);
+  const ExactPolygon drive_polygon =
+      transform_polygon(drive, drive_angle, 0.0);
   const ExactPolygon driven_polygon =
-      make_polygon(driven, driven_angle, center_distance);
+      transform_polygon(driven, driven_angle, center_distance);
   ExactPolygonSet overlap;
   overlap.insert(drive_polygon);
   overlap.intersection(driven_polygon);
-
-  std::list<ExactPolygonWithHoles> components;
-  overlap.polygons_with_holes(std::back_inserter(components));
-  ExactKernel::FT area = 0;
-  for (const ExactPolygonWithHoles& component : components) {
-    area += CGAL::abs(component.outer_boundary().area());
-    for (auto hole = component.holes_begin(); hole != component.holes_end(); ++hole) {
-      area -= CGAL::abs(hole->area());
-    }
-  }
-  return CGAL::to_double(area);
+  return polygon_set_area(overlap);
 }
 
 }  // namespace
@@ -573,23 +544,24 @@ double placed_pair_overlap_area(
 struct GearGenerator::Impl {
   explicit Impl(SampleConfig sample)
       : config(std::move(sample)),
+        motion(config),
         alpha(config.pressure_angle_deg * kPi / 180.0),
         addendum(config.addendum_factor * config.module),
         dedendum(config.dedendum_factor * config.module),
         fillet_radius(config.fillet_factor * config.module),
         integral(
-            [this](double phi) { return integral_density(phi); },
+            [this](double phi) { return arc_density(phi); },
             domain_start(),
             domain_end(),
             is_closed()) {
     validate_config();
     drive_teeth = config.teeth;
     active_start = is_closed() ? domain_start() : config.transmission.active_start;
-    active_end = is_closed() ? domain_start() + period() : config.transmission.active_end;
-    total_integral = arc_integral(active_start, active_end);
+    active_end =
+        is_closed() ? domain_start() + period() : config.transmission.active_end;
+    total_integral = integral.integral(active_start, active_end);
     center_distance =
         static_cast<double>(drive_teeth) * kPi * config.module / total_integral;
-    mean_pitch_phi = (active_end - active_start) / static_cast<double>(drive_teeth);
     if (is_closed()) {
       const double exact_driven_teeth =
           static_cast<double>(drive_teeth) * period() / cycle_delta();
@@ -597,12 +569,13 @@ struct GearGenerator::Impl {
       if (driven_teeth <= 0 ||
           std::abs(exact_driven_teeth - static_cast<double>(driven_teeth)) > 1e-7) {
         throw std::invalid_argument(
-            "Closed transmission requires z1 * period / cycle_delta to be an integer.");
+            "Closed transmission requires an integral driven tooth count.");
       }
       drive_cycle = period();
-      driven_cycle = period() * static_cast<double>(driven_teeth) /
-                     static_cast<double>(drive_teeth);
-      validate_driven_cycle();
+      driven_cycle =
+          period() * static_cast<double>(driven_teeth) /
+          static_cast<double>(drive_teeth);
+      validate_closed_motion();
     } else {
       driven_teeth = drive_teeth;
       drive_cycle = active_end - active_start;
@@ -615,204 +588,127 @@ struct GearGenerator::Impl {
         (dedendum - fillet_radius * (1.0 - std::sin(alpha)));
   }
 
-  bool has_sampled_transmission() const {
-    return !config.transmission.psi.empty();
-  }
-
   bool is_closed() const {
     return config.topology == GearTopology::kClosed;
   }
 
+  bool has_sampled_motion() const {
+    return !config.transmission.psi.empty();
+  }
+
   double domain_start() const {
-    return has_sampled_transmission() ? config.transmission.domain_start : 0.0;
+    return has_sampled_motion() ? config.transmission.domain_start : 0.0;
   }
 
   double domain_end() const {
-    return has_sampled_transmission() ? config.transmission.domain_end : 2.0 * kPi;
+    return has_sampled_motion() ? config.transmission.domain_end : 2.0 * kPi;
   }
 
   double period() const {
-    return has_sampled_transmission() ? config.transmission.period : 2.0 * kPi;
+    return has_sampled_motion() ? config.transmission.period : 2.0 * kPi;
   }
 
   double cycle_delta() const {
-    return has_sampled_transmission() ? config.transmission.cycle_delta : 2.0 * kPi;
+    return has_sampled_motion() ? config.transmission.cycle_delta : 2.0 * kPi;
   }
 
-  void validate_driven_cycle() const {
-    if (has_sampled_transmission()) {
-      const double sample_shift =
-          driven_cycle * static_cast<double>(config.transmission.psi.size()) /
-          period();
-      if (std::abs(sample_shift - std::round(sample_shift)) > 1e-8) {
-        throw std::invalid_argument(
-            "Closed sampled transmission grid does not align with the driven cycle.");
-      }
-    }
-    const double scale = std::max(1.0, std::abs(cycle_delta()));
-    for (int index = 0; index < 2048; ++index) {
-      const double phi =
-          active_start + period() * static_cast<double>(index) / 2048.0;
-      const double shifted = phi + driven_cycle;
-      if (std::abs((psi(shifted) - psi(phi)) - 2.0 * kPi) > 2e-5 * scale ||
-          std::abs(psi1(shifted) - psi1(phi)) > 2e-5 ||
-          std::abs(psi2(shifted) - psi2(phi)) > 5e-5 ||
-          std::abs(psi3(shifted) - psi3(phi)) > 1e-4) {
-        throw std::invalid_argument(
-            "Closed transmission is not periodic over one driven-gear revolution.");
-      }
-    }
+  double psi(double phi) const {
+    return motion.value(phi, 0);
+  }
+
+  double psi1(double phi) const {
+    return motion.value(phi, 1);
+  }
+
+  double psi2(double phi) const {
+    return motion.value(phi, 2);
+  }
+
+  double psi3(double phi) const {
+    return motion.value(phi, 3);
   }
 
   void validate_config() const {
     if (config.name.empty() || config.teeth < 6 || config.module <= 0.0) {
       throw std::invalid_argument("Invalid sample name, tooth count, or module.");
     }
-    if (!(alpha > 0.0 && alpha < 0.5 * kPi)) {
-      throw std::invalid_argument("Pressure angle must be between 0 and 90 degrees.");
+    if (!(alpha > 0.0 && alpha < 0.45 * kPi)) {
+      throw std::invalid_argument("Pressure angle must be between 0 and 81 degrees.");
     }
-    if (!(addendum > 0.0 && dedendum > fillet_radius && fillet_radius > 0.0)) {
-      throw std::invalid_argument("Invalid rack-cutter dimensions.");
+    if (!(addendum > 0.0 && dedendum > fillet_radius &&
+          fillet_radius >= 0.0)) {
+      throw std::invalid_argument("Invalid cutter dimensions.");
     }
-    if (has_sampled_transmission()) {
-      const std::size_t sample_count = config.transmission.psi.size();
-      if (sample_count < 256 ||
-          config.transmission.psi1.size() != sample_count ||
-          config.transmission.psi2.size() != sample_count ||
-          config.transmission.psi3.size() != sample_count) {
+    const double pitch = kPi * config.module;
+    if (0.25 * pitch - dedendum * std::tan(alpha) <= 0.03 * config.module) {
+      throw std::invalid_argument(
+          "Rack cutter tip is too narrow; reduce dedendum or pressure angle.");
+    }
+
+    if (has_sampled_motion()) {
+      const std::size_t count = config.transmission.psi.size();
+      if (count < 64 || config.transmission.psi1.size() != count ||
+          config.transmission.psi2.size() != count) {
         throw std::invalid_argument(
-            "Sampled transmission arrays must have equal length of at least 256.");
+            "Sampled motion requires equal psi, psi1 and psi2 arrays of at least 64 values.");
       }
       if (!(domain_start() < domain_end())) {
-        throw std::invalid_argument("Sampled transmission domain is invalid.");
+        throw std::invalid_argument("Sampled motion domain is invalid.");
       }
-      if (is_closed()) {
-        if (!(period() > 0.0 && cycle_delta() > 0.0)) {
-          throw std::invalid_argument("Closed transmission period and cycle delta must be positive.");
-        }
-      } else if (!(domain_start() < config.transmission.active_start &&
-                   config.transmission.active_start < config.transmission.active_end &&
-                   config.transmission.active_end < domain_end())) {
+      if (!is_closed() &&
+          !(domain_start() < config.transmission.active_start &&
+            config.transmission.active_start < config.transmission.active_end &&
+            config.transmission.active_end < domain_end())) {
         throw std::invalid_argument(
-            "Open transmission requires a padded domain around the active interval.");
+            "Open motion requires padding on both sides of the active interval.");
       }
     } else if (!is_closed()) {
-      throw std::invalid_argument("Open gears require sampled transmission data.");
+      throw std::invalid_argument("Open gears require sampled motion data.");
     }
-    for (int index = 0; index <= 8192; ++index) {
+
+    const int check_count = has_sampled_motion()
+                                ? std::max(
+                                      8192,
+                                      static_cast<int>(
+                                          config.transmission.psi.size() * 2))
+                                : 16384;
+    for (int index = 0; index <= check_count; ++index) {
+      const double phi = std::lerp(
+          domain_start(),
+          domain_end(),
+          static_cast<double>(index) / static_cast<double>(check_count));
+      const double ratio = psi1(phi);
+      if (!std::isfinite(ratio) || ratio <= 1e-7 || ratio >= 1e7) {
+        throw std::invalid_argument(
+            "Motion law is not a bounded orientation-preserving map.");
+      }
+    }
+  }
+
+  void validate_closed_motion() const {
+    const double scale = std::max(1.0, std::abs(cycle_delta()));
+    for (int index = 0; index < 4096; ++index) {
       const double phi =
-          std::lerp(domain_start(), domain_end(), static_cast<double>(index) / 8192.0);
-      if (psi1(phi) <= 1e-8) {
-        throw std::invalid_argument("Transmission derivative is not strictly positive.");
+          active_start + period() * static_cast<double>(index) / 4096.0;
+      const double shifted = phi + driven_cycle;
+      if (std::abs((psi(shifted) - psi(phi)) - 2.0 * kPi) >
+              3e-5 * scale ||
+          std::abs(psi1(shifted) - psi1(phi)) > 3e-5 ||
+          std::abs(psi2(shifted) - psi2(phi)) > 1e-4) {
+        throw std::invalid_argument(
+            "Closed motion is not compatible with one driven-gear revolution.");
       }
     }
-  }
-
-  double sample_values(
-      const std::vector<double>& values,
-      double phi,
-      double periodic_delta) const {
-    const double start = domain_start();
-    const double end = domain_end();
-    const double length = end - start;
-    double cycles = 0.0;
-    double x = phi;
-    if (is_closed()) {
-      cycles = std::floor((phi - start) / period());
-      x = phi - cycles * period();
-      if (x < start) {
-        x += period();
-      } else if (x >= start + period()) {
-        x -= period();
-      }
-      const double scaled =
-          (x - start) * static_cast<double>(values.size()) / period();
-      int index = static_cast<int>(std::floor(scaled));
-      index = std::clamp(index, 0, static_cast<int>(values.size()) - 1);
-      const int next = (index + 1) % static_cast<int>(values.size());
-      const double local = scaled - static_cast<double>(index);
-      double right = values[static_cast<std::size_t>(next)];
-      if (next == 0) {
-        right += periodic_delta;
-      }
-      return cycles * periodic_delta +
-             std::lerp(values[static_cast<std::size_t>(index)], right, local);
-    }
-
-    const double clamped = std::clamp(x, start, end);
-    const double scaled =
-        (clamped - start) * static_cast<double>(values.size() - 1) / length;
-    int index = static_cast<int>(std::floor(scaled));
-    index = std::clamp(index, 0, static_cast<int>(values.size()) - 2);
-    const double local = scaled - static_cast<double>(index);
-    return std::lerp(
-        values[static_cast<std::size_t>(index)],
-        values[static_cast<std::size_t>(index + 1)],
-        local);
-  }
-
-  double psi(double phi) const {
-    if (has_sampled_transmission()) {
-      return sample_values(config.transmission.psi, phi, cycle_delta());
-    }
-    double value = phi;
-    for (const Harmonic& harmonic : config.harmonics) {
-      value += harmonic.amplitude *
-               std::sin(static_cast<double>(harmonic.order) * phi);
-    }
-    return value;
-  }
-
-  double psi1(double phi) const {
-    if (has_sampled_transmission()) {
-      return sample_values(config.transmission.psi1, phi, 0.0);
-    }
-    double value = 1.0;
-    for (const Harmonic& harmonic : config.harmonics) {
-      const double order = static_cast<double>(harmonic.order);
-      value += harmonic.amplitude * order * std::cos(order * phi);
-    }
-    return value;
-  }
-
-  double psi2(double phi) const {
-    if (has_sampled_transmission()) {
-      return sample_values(config.transmission.psi2, phi, 0.0);
-    }
-    double value = 0.0;
-    for (const Harmonic& harmonic : config.harmonics) {
-      const double order = static_cast<double>(harmonic.order);
-      value -= harmonic.amplitude * order * order * std::sin(order * phi);
-    }
-    return value;
-  }
-
-  double psi3(double phi) const {
-    if (has_sampled_transmission()) {
-      return sample_values(config.transmission.psi3, phi, 0.0);
-    }
-    double value = 0.0;
-    for (const Harmonic& harmonic : config.harmonics) {
-      const double order = static_cast<double>(harmonic.order);
-      value -=
-          harmonic.amplitude * order * order * order * std::cos(order * phi);
-    }
-    return value;
   }
 
   double w(double phi) const {
     const double first = psi1(phi);
-    const double second = psi2(phi);
-    return std::hypot(second, first * (1.0 + first));
+    return std::hypot(psi2(phi), first * (1.0 + first));
   }
 
-  double integral_density(double phi) const {
+  double arc_density(double phi) const {
     const double first = psi1(phi);
     return w(phi) / std::pow(1.0 + first, 2);
-  }
-
-  double arc_integral(double start, double end) const {
-    return integral.integral(start, end);
   }
 
   double drive_radius(double phi) const {
@@ -845,20 +741,19 @@ struct GearGenerator::Impl {
   double drive_h(double phi) const {
     const double first = psi1(phi);
     const double second = psi2(phi);
-    const double numerator =
-        (1.0 + first) *
-        (first * (psi3(phi) - first - first * first) - 2.0 * second * second);
-    return numerator / std::pow(w(phi), 2);
+    return (1.0 + first) *
+           (first * (psi3(phi) - first - first * first) -
+            2.0 * second * second) /
+           std::pow(w(phi), 2);
   }
 
   double driven_h(double phi) const {
     const double first = psi1(phi);
     const double second = psi2(phi);
-    const double numerator =
-        (1.0 + first) *
-        (first * (psi3(phi) + first * first + first * first * first) -
-         second * second);
-    return numerator / std::pow(w(phi), 2);
+    return (1.0 + first) *
+           (first * (psi3(phi) + first * first + first * first * first) -
+            second * second) /
+           std::pow(w(phi), 2);
   }
 
   double drive_kappa(double phi) const {
@@ -873,846 +768,346 @@ struct GearGenerator::Impl {
            (center_distance * w(phi));
   }
 
-  double lambda(int tooth, Flank flank, double phi) const {
-    return flank_sign(flank) * kPi * config.module / 4.0 -
-           center_distance * arc_integral(chis[static_cast<std::size_t>(tooth)], phi);
-  }
-
-  Complex drive_flank(int tooth, Flank flank, double phi) const {
-    const double sign = flank_sign(flank);
-    return drive_centrode(phi) +
-           lambda(tooth, flank, phi) * drive_tangent(phi) * cis(sign * alpha) *
-               std::cos(alpha);
-  }
-
-  Complex driven_flank(int tooth, Flank flank, double phi) const {
-    const double sign = flank_sign(flank);
-    return driven_centrode(phi) +
-           lambda(tooth, flank, phi) * driven_tangent(phi) * cis(sign * alpha) *
-               std::cos(alpha);
-  }
-
-  Complex drive_addendum(double phi) const {
-    return drive_centrode(phi) + addendum * Complex(0.0, 1.0) * drive_tangent(phi);
-  }
-
-  Complex drive_dedendum(double phi) const {
-    return drive_centrode(phi) - dedendum * Complex(0.0, 1.0) * drive_tangent(phi);
-  }
-
-  Complex driven_addendum(double phi) const {
-    return driven_centrode(phi) - addendum * Complex(0.0, 1.0) * driven_tangent(phi);
-  }
-
-  Complex driven_dedendum(double phi) const {
-    return driven_centrode(phi) + dedendum * Complex(0.0, 1.0) * driven_tangent(phi);
-  }
-
-  Complex drive_fillet(int tooth, Flank flank, double phi) const {
-    const double sign = flank_sign(flank);
-    const double root_height = dedendum - fillet_radius;
-    const Complex offset(
-        lambda(tooth, flank, phi) + sign * fillet_radius / std::cos(alpha) +
-            sign * root_height * std::tan(alpha),
-        -root_height);
-    const Complex midpoint = drive_centrode(phi) + offset * drive_tangent(phi);
-    const double orientation = oriented_sign(drive_h(phi), -1.0);
-    const Complex normal =
-        -orientation * offset / std::abs(offset) * drive_tangent(phi);
-    return midpoint + fillet_radius * normal;
-  }
-
-  Complex driven_fillet(int tooth, Flank flank, double phi) const {
-    const double sign = flank_sign(flank);
-    const double root_height = dedendum - fillet_radius;
-    const Complex offset(
-        lambda(tooth, flank, phi) - sign * fillet_radius / std::cos(alpha) -
-            sign * root_height * std::tan(alpha),
-        root_height);
-    const Complex midpoint = driven_centrode(phi) + offset * driven_tangent(phi);
-    const double orientation = oriented_sign(driven_h(phi), 1.0);
-    const Complex normal =
-        orientation * offset / std::abs(offset) * driven_tangent(phi);
-    return midpoint + fillet_radius * normal;
-  }
-
-  void validate_centrodes() {
+  void measure_centrodes() {
     maximum_drive_curvature = -std::numeric_limits<double>::infinity();
     minimum_driven_curvature = std::numeric_limits<double>::infinity();
-    std::vector<Point> drive;
-    std::vector<Point> driven;
-    drive.reserve(4096);
-    driven.reserve(4096);
-    for (int index = 0; index < 4096; ++index) {
-      const double fraction = static_cast<double>(index) / 4096.0;
-      const double drive_phi =
-          is_closed() ? active_start + fraction * drive_cycle
-                      : std::lerp(domain_start(), domain_end(), fraction);
-      const double driven_phi =
-          is_closed() ? active_start + fraction * driven_cycle : drive_phi;
+    maximum_pitch_radius = 0.0;
+    minimum_pitch_radius = std::numeric_limits<double>::infinity();
+    const double span = is_closed() ? std::max(drive_cycle, driven_cycle)
+                                    : domain_end() - domain_start();
+    const double start = is_closed() ? active_start : domain_start();
+    for (int index = 0; index <= 16384; ++index) {
+      const double phi =
+          start + span * static_cast<double>(index) / 16384.0;
       maximum_drive_curvature =
-          std::max(maximum_drive_curvature, drive_kappa(drive_phi));
+          std::max(maximum_drive_curvature, drive_kappa(phi));
       minimum_driven_curvature =
-          std::min(minimum_driven_curvature, driven_kappa(driven_phi));
-      if (is_closed()) {
-        drive.push_back(to_point(drive_centrode(drive_phi)));
-        driven.push_back(to_point(driven_centrode(driven_phi)));
-      }
+          std::min(minimum_driven_curvature, driven_kappa(phi));
+      maximum_pitch_radius = std::max(
+          {maximum_pitch_radius, drive_radius(phi), driven_radius(phi)});
+      minimum_pitch_radius = std::min(
+          {minimum_pitch_radius, drive_radius(phi), driven_radius(phi)});
     }
     centrodes_are_convex =
         maximum_drive_curvature <= 1e-9 && minimum_driven_curvature >= -1e-9;
-    if (!centrodes_are_convex && !config.allow_nonconvex_centrodes) {
-      throw std::runtime_error("Sample centrodes are not convex with paper-compatible orientation.");
-    }
-    if (is_closed()) {
-      CGAL::Polygon_2<Kernel> drive_polygon(drive.begin(), drive.end());
-      CGAL::Polygon_2<Kernel> driven_polygon(driven.begin(), driven.end());
-      if (!drive_polygon.is_simple() || !driven_polygon.is_simple()) {
-        throw std::runtime_error("Sample centrode self-intersects.");
-      }
-    }
   }
 
-  void solve_chis() {
-    chis.clear();
-    const int count =
-        is_closed() ? std::max(drive_teeth, driven_teeth)
-                    : drive_teeth + 2 * padding_teeth;
-    chis.reserve(static_cast<std::size_t>(count));
-    for (int tooth = 0; tooth < count; ++tooth) {
-      const int logical_tooth = is_closed() ? tooth : tooth - padding_teeth;
-      const double offset =
-          is_closed() ? static_cast<double>(logical_tooth)
-                      : static_cast<double>(logical_tooth) + 0.5;
-      const double target = offset * kPi * config.module;
-      const ScalarFunction equation = [this, target](double phi) {
-        return center_distance * arc_integral(active_start, phi) - target;
-      };
-      const double low = is_closed() ? active_start : domain_start();
-      const double high =
-          is_closed() ? active_start + std::max(drive_cycle, driven_cycle) : domain_end();
-      const std::vector<double> roots = find_roots(equation, low, high, 8192);
-      if (roots.empty()) {
-        throw std::runtime_error("Unable to solve chi(k).");
-      }
-      chis.push_back(roots.front());
-    }
-  }
+  void append_involute_tooth(
+      std::vector<Complex>& boundary,
+      double center,
+      double margin) const {
+    const double pitch = kPi * config.module;
+    const double tangent = std::tan(alpha);
+    const double root_half_width = 0.25 * pitch + addendum * tangent;
+    const double sharp_tip_half_width = 0.25 * pitch - dedendum * tangent;
+    const double maximum_radius =
+        0.9 * sharp_tip_half_width * std::cos(alpha) /
+        (1.0 - std::sin(alpha));
+    const double radius = std::clamp(fillet_radius, 0.0, maximum_radius);
+    const double y_shift = -margin;
 
-  double directional_root(
-      const ScalarFunction& equation,
-      double reference,
-      int direction,
-      double span) const {
-    if (is_closed()) {
-      return choose_directional_root(equation, reference, direction, span);
-    }
-    for (const double multiplier : {1.0, 1.5, 2.0}) {
-      const double low = std::max(domain_start(), reference - span * multiplier);
-      const double high = std::min(domain_end(), reference + span * multiplier);
-      const std::vector<double> roots = find_roots(equation, low, high, 4096);
-      std::optional<double> best;
-      for (const double root : roots) {
-        const bool correct_side =
-            direction < 0 ? root < reference - 1e-8 : root > reference + 1e-8;
-        if (correct_side &&
-            (!best || std::abs(root - reference) < std::abs(*best - reference))) {
-          best = root;
-        }
-      }
-      if (best) {
-        return *best;
-      }
-    }
-    throw std::runtime_error("Unable to bracket a required open-gear root.");
-  }
-
-  std::optional<double> singular(int tooth, Flank flank, bool driven) const {
-    const double sign = flank_sign(flank);
-    const ScalarFunction equation = [this, tooth, flank, driven, sign](double phi) {
-      const double curvature = driven ? driven_kappa(phi) : drive_kappa(phi);
-      return lambda(tooth, flank, phi) * curvature - sign * std::tan(alpha);
-    };
-    int direction = 0;
-    if (!driven) {
-      direction = flank == Flank::kMinus ? -1 : 1;
+    boundary.emplace_back(center - 0.5 * pitch, addendum + y_shift);
+    boundary.emplace_back(center - root_half_width, addendum + y_shift);
+    if (radius <= 1e-12) {
+      boundary.emplace_back(
+          center - sharp_tip_half_width,
+          -dedendum + y_shift);
+      boundary.emplace_back(
+          center + sharp_tip_half_width,
+          -dedendum + y_shift);
     } else {
-      direction = flank == Flank::kMinus ? 1 : -1;
-    }
-    try {
-      return directional_root(
-          equation,
-          chis[static_cast<std::size_t>(tooth)],
-          direction,
-          5.0 * mean_pitch_phi);
-    } catch (const std::runtime_error&) {
-      if (config.allow_nonconvex_centrodes) {
-        return std::nullopt;
+      const double transition =
+          radius * (1.0 - std::sin(alpha)) / std::cos(alpha);
+      const Complex left_center(
+          center - sharp_tip_half_width + transition,
+          -dedendum + radius + y_shift);
+      for (int index = 0; index <= 6; ++index) {
+        const double angle = std::lerp(
+            kPi + alpha,
+            1.5 * kPi,
+            static_cast<double>(index) / 6.0);
+        boundary.push_back(left_center + radius * cis(angle));
       }
-      throw;
+      const Complex right_center(
+          center + sharp_tip_half_width - transition,
+          -dedendum + radius + y_shift);
+      boundary.emplace_back(right_center.real(), -dedendum + y_shift);
+      for (int index = 0; index <= 6; ++index) {
+        const double angle = std::lerp(
+            -0.5 * kPi,
+            -alpha,
+            static_cast<double>(index) / 6.0);
+        boundary.push_back(right_center + radius * cis(angle));
+      }
     }
+    boundary.emplace_back(center + root_half_width, addendum + y_shift);
+    boundary.emplace_back(center + 0.5 * pitch, addendum + y_shift);
   }
 
-  double solve_lambda_target(
-      int tooth,
-      Flank flank,
-      double target,
-      int direction) const {
-    const ScalarFunction equation =
-        [this, tooth, flank, target](double phi) {
-          return lambda(tooth, flank, phi) - target;
-        };
-    return directional_root(
-        equation,
-        chis[static_cast<std::size_t>(tooth)],
-        direction,
-        5.0 * mean_pitch_phi);
+  void append_cycloidal_tooth(
+      std::vector<Complex>& boundary,
+      double center,
+      double margin) const {
+    const double pitch = kPi * config.module;
+    const double root_half_width =
+        0.25 * pitch + addendum * std::tan(alpha);
+    const double tip_half_width =
+        0.25 * pitch - dedendum * std::tan(alpha);
+    const double blend = std::clamp(config.cycloidal_rolling_factor, 0.0, 1.0);
+    const double y_shift = -margin;
+
+    boundary.emplace_back(center - 0.5 * pitch, addendum + y_shift);
+    boundary.emplace_back(center - root_half_width, addendum + y_shift);
+    for (int index = 1; index <= 14; ++index) {
+      const double q = static_cast<double>(index) / 14.0;
+      const double tau = kPi * q;
+      const double cycloid_x = (tau - std::sin(tau)) / kPi;
+      const double cycloid_y = 0.5 * (1.0 - std::cos(tau));
+      const double x_fraction = std::lerp(q, cycloid_x, blend);
+      const double y_fraction = std::lerp(q, cycloid_y, blend);
+      boundary.emplace_back(
+          center - std::lerp(root_half_width, tip_half_width, x_fraction),
+          std::lerp(addendum, -dedendum, y_fraction) + y_shift);
+    }
+    boundary.emplace_back(center + tip_half_width, -dedendum + y_shift);
+    for (int index = 13; index >= 0; --index) {
+      const double q = static_cast<double>(index) / 14.0;
+      const double tau = kPi * q;
+      const double cycloid_x = (tau - std::sin(tau)) / kPi;
+      const double cycloid_y = 0.5 * (1.0 - std::cos(tau));
+      const double x_fraction = std::lerp(q, cycloid_x, blend);
+      const double y_fraction = std::lerp(q, cycloid_y, blend);
+      boundary.emplace_back(
+          center + std::lerp(root_half_width, tip_half_width, x_fraction),
+          std::lerp(addendum, -dedendum, y_fraction) + y_shift);
+    }
+    boundary.emplace_back(center + 0.5 * pitch, addendum + y_shift);
   }
 
-  CurveIntersection solve_transition(
-      int tooth,
-      Flank flank,
+  std::vector<Complex> make_rack(
+      double common_arc,
+      double phase_offset,
+      double half_width,
+      double top,
+      double margin) const {
+    const double pitch = kPi * config.module;
+    const double first_center =
+        phase_offset - common_arc +
+        std::floor((-half_width - phase_offset + common_arc) / pitch) * pitch;
+    std::vector<Complex> boundary;
+    boundary.reserve(
+        static_cast<std::size_t>(
+            std::ceil(2.0 * half_width / pitch) * 20.0 + 8.0));
+    boundary.emplace_back(first_center - pitch, addendum - margin);
+    for (double center = first_center - 0.5 * pitch;
+         center <= half_width + pitch;
+         center += pitch) {
+      if (config.profile_family == ProfileFamily::kCycloidalRack) {
+        append_cycloidal_tooth(boundary, center, margin);
+      } else {
+        append_involute_tooth(boundary, center, margin);
+      }
+    }
+    const double right = boundary.back().real();
+    const double left = boundary.front().real();
+    boundary.emplace_back(right, top);
+    boundary.emplace_back(left, top);
+    return boundary;
+  }
+
+  std::vector<Point> generate_swept_gear(
       bool driven,
-      double contact_parameter,
-      double dedendum_parameter) {
-    const double chi = chis[static_cast<std::size_t>(tooth)];
-    const double previous =
-        driven ? previous_driven_chi(tooth) : previous_drive_chi(tooth);
-    const double next = driven ? next_driven_chi(tooth) : next_drive_chi(tooth);
-    double flank_low = 0.0;
-    double flank_high = 0.0;
-    if (!driven && flank == Flank::kMinus) {
-      flank_low = contact_parameter;
-      flank_high = chi;
-    } else if (!driven && flank == Flank::kPlus) {
-      flank_low = previous;
-      flank_high = contact_parameter;
-    } else if (driven && flank == Flank::kMinus) {
-      flank_low = previous - mean_pitch_phi;
-      flank_high = contact_parameter;
-    } else {
-      flank_low = contact_parameter;
-      flank_high = next + mean_pitch_phi;
-    }
-    const double fillet_low = std::min(dedendum_parameter, contact_parameter);
-    const double fillet_high = std::max(dedendum_parameter, contact_parameter);
-
-    const CurveFunction flank_curve = [this, tooth, flank, driven](double phi) {
-      return driven ? driven_flank(tooth, flank, phi)
-                    : drive_flank(tooth, flank, phi);
-    };
-    const CurveFunction fillet_curve = [this, tooth, flank, driven](double phi) {
-      return driven ? driven_fillet(tooth, flank, phi)
-                    : drive_fillet(tooth, flank, phi);
-    };
-    const std::vector<CurveIntersection> intersections =
-        find_curve_intersections(
-            flank_curve,
-            std::min(flank_low, flank_high),
-            std::max(flank_low, flank_high),
-            fillet_curve,
-            fillet_low,
-            fillet_high);
-    const double singular_parameter =
-        driven
-            ? (flank == Flank::kMinus
-                   ? driven_singular_minus[static_cast<std::size_t>(tooth)]
-                   : driven_singular_plus[static_cast<std::size_t>(tooth)])
-            : (flank == Flank::kMinus
-                   ? drive_singular_minus[static_cast<std::size_t>(tooth)]
-                   : drive_singular_plus[static_cast<std::size_t>(tooth)]);
-    const CurveIntersection selected = choose_intersection(
-        intersections,
-        [contact_parameter](const CurveIntersection& intersection) {
-          return std::abs(intersection.lhs - contact_parameter) > 1e-3 ||
-                 std::abs(intersection.rhs - contact_parameter) > 1e-3;
-        },
-        [singular_parameter](const CurveIntersection& intersection) {
-          return std::abs(intersection.lhs - singular_parameter);
-        },
-        driven ? "driven flank/fillet transition" : "drive flank/fillet transition");
-    maximum_intersection_residual =
-        std::max(maximum_intersection_residual, selected.residual);
-    return selected;
-  }
-
-  CurveIntersection solve_addendum_intersection(
-      int tooth,
-      Flank flank,
-      bool driven,
-      double transition_parameter) {
-    const double chi = chis[static_cast<std::size_t>(tooth)];
-    const double previous =
-        driven ? previous_driven_chi(tooth) : previous_drive_chi(tooth);
-    const double next = driven ? next_driven_chi(tooth) : next_drive_chi(tooth);
-    double flank_low = 0.0;
-    double flank_high = 0.0;
-    double addendum_low = 0.0;
-    double addendum_high = 0.0;
-    if (!driven && flank == Flank::kMinus) {
-      flank_low = transition_parameter;
-      flank_high = next;
-      addendum_low = previous;
-      addendum_high = chi;
-    } else if (!driven && flank == Flank::kPlus) {
-      flank_low = previous;
-      flank_high = transition_parameter;
-      addendum_low = chi;
-      addendum_high = next;
-    } else if (driven && flank == Flank::kMinus) {
-      flank_low = previous - mean_pitch_phi;
-      flank_high = transition_parameter;
-      addendum_low = previous;
-      addendum_high = chi;
-    } else {
-      flank_low = transition_parameter;
-      flank_high = next + mean_pitch_phi;
-      addendum_low = chi;
-      addendum_high = next;
-    }
-    const CurveFunction flank_curve = [this, tooth, flank, driven](double phi) {
-      return driven ? driven_flank(tooth, flank, phi)
-                    : drive_flank(tooth, flank, phi);
-    };
-    const CurveFunction addendum_curve = [this, driven](double phi) {
-      return driven ? driven_addendum(phi) : drive_addendum(phi);
-    };
-    const std::vector<CurveIntersection> intersections = find_curve_intersections(
-        flank_curve,
-        std::min(flank_low, flank_high),
-        std::max(flank_low, flank_high),
-        addendum_curve,
-        std::min(addendum_low, addendum_high),
-        std::max(addendum_low, addendum_high));
-    const CurveIntersection selected = choose_intersection(
-        intersections,
-        [flank_low, flank_high, addendum_low, addendum_high](
-            const CurveIntersection& intersection) {
-          return intersection.lhs >= std::min(flank_low, flank_high) - 1e-8 &&
-                 intersection.lhs <= std::max(flank_low, flank_high) + 1e-8 &&
-                 intersection.rhs >= std::min(addendum_low, addendum_high) - 1e-8 &&
-                 intersection.rhs <= std::max(addendum_low, addendum_high) + 1e-8;
-        },
-        [chi](const CurveIntersection& intersection) {
-          return std::abs(intersection.lhs - chi) +
-                 0.25 * std::abs(intersection.rhs - chi);
-        },
-        driven ? "driven flank/addendum" : "drive flank/addendum");
-    maximum_intersection_residual =
-        std::max(maximum_intersection_residual, selected.residual);
-    return selected;
-  }
-
-  int drive_first_tooth() const {
-    return is_closed() ? 0 : padding_teeth;
-  }
-
-  int drive_last_tooth() const {
-    return drive_first_tooth() + drive_teeth - 1;
-  }
-
-  int driven_first_tooth() const {
-    return is_closed() ? 0 : padding_teeth;
-  }
-
-  int driven_last_tooth() const {
-    return driven_first_tooth() + driven_teeth - 1;
-  }
-
-  int geometry_first_tooth() const {
-    return is_closed() ? 0 : padding_teeth - 1;
-  }
-
-  int geometry_last_tooth() const {
-    return is_closed() ? static_cast<int>(chis.size()) - 1
-                       : padding_teeth + drive_teeth;
-  }
-
-  double previous_drive_chi(int tooth) const {
-    if (is_closed() && tooth == 0) {
-      return chis[static_cast<std::size_t>(drive_teeth - 1)] - drive_cycle;
-    }
-    return chis[static_cast<std::size_t>(tooth - 1)];
-  }
-
-  double next_drive_chi(int tooth) const {
-    if (is_closed() && tooth + 1 == drive_teeth) {
-      return chis.front() + drive_cycle;
-    }
-    return chis[static_cast<std::size_t>(tooth + 1)];
-  }
-
-  double previous_driven_chi(int tooth) const {
-    if (is_closed() && tooth == 0) {
-      return chis[static_cast<std::size_t>(driven_teeth - 1)] - driven_cycle;
-    }
-    return chis[static_cast<std::size_t>(tooth - 1)];
-  }
-
-  double next_driven_chi(int tooth) const {
-    if (is_closed() && tooth + 1 == driven_teeth) {
-      return chis.front() + driven_cycle;
-    }
-    return chis[static_cast<std::size_t>(tooth + 1)];
-  }
-
-  void solve_checkpoints() {
-    checkpoints.clear();
-    checkpoints.reserve(static_cast<std::size_t>(drive_teeth));
-    const std::size_t scalar_count = chis.size();
-    drive_singular_minus.resize(scalar_count);
-    drive_singular_plus.resize(scalar_count);
-    driven_singular_minus.resize(scalar_count);
-    driven_singular_plus.resize(scalar_count);
-    drive_free_minus.resize(scalar_count);
-    drive_free_plus.resize(scalar_count);
-    driven_free_minus.resize(scalar_count);
-    driven_free_plus.resize(scalar_count);
-
-    for (int tooth = geometry_first_tooth(); tooth <= geometry_last_tooth(); ++tooth) {
-      const std::optional<double> drive_minus_root =
-          singular(tooth, Flank::kMinus, false);
-      const std::optional<double> drive_plus_root =
-          singular(tooth, Flank::kPlus, false);
-      const double drive_minus =
-          drive_minus_root.value_or(chis[static_cast<std::size_t>(tooth)]);
-      const double drive_plus =
-          drive_plus_root.value_or(chis[static_cast<std::size_t>(tooth)]);
-      const double drive_minus_kappa = drive_kappa(drive_minus);
-      const double drive_plus_kappa = drive_kappa(drive_plus);
-      const bool drive_minus_free =
-          !drive_minus_root || -drive_minus_kappa <= curvature_limit + 1e-11;
-      const bool drive_plus_free =
-          !drive_plus_root || -drive_plus_kappa <= curvature_limit + 1e-11;
-
-      const std::size_t index = static_cast<std::size_t>(tooth);
-      drive_singular_minus[index] = drive_minus;
-      drive_singular_plus[index] = drive_plus;
-      drive_free_minus[index] = drive_minus_free;
-      drive_free_plus[index] = drive_plus_free;
-      if (tooth >= drive_first_tooth() && tooth <= drive_last_tooth()) {
-        checkpoints.push_back({
-            chis[index],
-            drive_minus,
-            drive_plus,
-            drive_minus_kappa,
-            drive_plus_kappa,
-            !drive_minus_free,
-            !drive_plus_free,
-        });
-      }
-    }
-
-    const int driven_geometry_first = is_closed() ? 0 : geometry_first_tooth();
-    const int driven_geometry_last =
-        is_closed() ? driven_teeth - 1 : geometry_last_tooth();
-    for (int tooth = driven_geometry_first; tooth <= driven_geometry_last; ++tooth) {
-      const std::optional<double> driven_minus_root =
-          singular(tooth, Flank::kMinus, true);
-      const std::optional<double> driven_plus_root =
-          singular(tooth, Flank::kPlus, true);
-      const double driven_minus =
-          driven_minus_root.value_or(chis[static_cast<std::size_t>(tooth)]);
-      const double driven_plus =
-          driven_plus_root.value_or(chis[static_cast<std::size_t>(tooth)]);
-      const double driven_minus_kappa = driven_kappa(driven_minus);
-      const double driven_plus_kappa = driven_kappa(driven_plus);
-      const std::size_t index = static_cast<std::size_t>(tooth);
-      driven_singular_minus[index] = driven_minus;
-      driven_singular_plus[index] = driven_plus;
-      driven_free_minus[index] =
-          !driven_minus_root || driven_minus_kappa <= curvature_limit + 1e-11;
-      driven_free_plus[index] =
-          !driven_plus_root || driven_plus_kappa <= curvature_limit + 1e-11;
-    }
-  }
-
-  void solve_drive_geometry() {
-    const double fillet_dedendum_lambda =
-        (dedendum - fillet_radius) * std::tan(alpha) +
-        fillet_radius / std::cos(alpha);
-    const double tangent_lambda =
-        ((dedendum - fillet_radius) / std::sin(alpha) + fillet_radius) /
-        std::cos(alpha);
-    drive_geometry.resize(chis.size());
-
-    for (int tooth = geometry_first_tooth(); tooth <= geometry_last_tooth(); ++tooth) {
-      DriveGeometry geometry;
-      geometry.minus_fillet_dedendum =
-          solve_lambda_target(tooth, Flank::kMinus, fillet_dedendum_lambda, -1);
-      geometry.plus_fillet_dedendum =
-          solve_lambda_target(tooth, Flank::kPlus, -fillet_dedendum_lambda, 1);
-
-      const std::size_t index = static_cast<std::size_t>(tooth);
-      const double minus_contact =
-          solve_lambda_target(tooth, Flank::kMinus, tangent_lambda, -1);
-      const double plus_contact =
-          solve_lambda_target(tooth, Flank::kPlus, -tangent_lambda, 1);
-      if (drive_free_minus[index]) {
-        geometry.minus_flank_transition = minus_contact;
-        geometry.minus_fillet_transition = minus_contact;
-      } else {
-        const CurveIntersection transition = solve_transition(
-            tooth,
-            Flank::kMinus,
-            false,
-            minus_contact,
-            geometry.minus_fillet_dedendum);
-        geometry.minus_flank_transition = transition.lhs;
-        geometry.minus_fillet_transition = transition.rhs;
-      }
-
-      if (drive_free_plus[index]) {
-        geometry.plus_flank_transition = plus_contact;
-        geometry.plus_fillet_transition = plus_contact;
-      } else {
-        const CurveIntersection transition = solve_transition(
-            tooth,
-            Flank::kPlus,
-            false,
-            plus_contact,
-            geometry.plus_fillet_dedendum);
-        geometry.plus_flank_transition = transition.lhs;
-        geometry.plus_fillet_transition = transition.rhs;
-      }
-
-      const CurveIntersection minus_addendum = solve_addendum_intersection(
-          tooth, Flank::kMinus, false, geometry.minus_flank_transition);
-      geometry.minus_flank_addendum = minus_addendum.lhs;
-      geometry.minus_addendum = minus_addendum.rhs;
-      const CurveIntersection plus_addendum = solve_addendum_intersection(
-          tooth, Flank::kPlus, false, geometry.plus_flank_transition);
-      geometry.plus_flank_addendum = plus_addendum.lhs;
-      geometry.plus_addendum = plus_addendum.rhs;
-      drive_geometry[index] = geometry;
-    }
-  }
-
-  void solve_driven_geometry() {
-    const double fillet_dedendum_lambda =
-        (dedendum - fillet_radius) * std::tan(alpha) +
-        fillet_radius / std::cos(alpha);
-    const double tangent_lambda =
-        ((dedendum - fillet_radius) / std::sin(alpha) + fillet_radius) /
-        std::cos(alpha);
-    driven_geometry.resize(chis.size());
-
-    const int first = is_closed() ? 0 : geometry_first_tooth();
-    const int last = is_closed() ? driven_teeth - 1 : geometry_last_tooth();
-    for (int tooth = first; tooth <= last; ++tooth) {
-      DrivenGeometry geometry;
-      geometry.minus_fillet_dedendum =
-          solve_lambda_target(tooth, Flank::kMinus, -fillet_dedendum_lambda, -1);
-      geometry.plus_fillet_dedendum =
-          solve_lambda_target(tooth, Flank::kPlus, fillet_dedendum_lambda, 1);
-
-      const std::size_t index = static_cast<std::size_t>(tooth);
-      const double minus_contact =
-          solve_lambda_target(tooth, Flank::kMinus, -tangent_lambda, 1);
-      const double plus_contact =
-          solve_lambda_target(tooth, Flank::kPlus, tangent_lambda, -1);
-      if (driven_free_minus[index]) {
-        geometry.minus_flank_transition = minus_contact;
-        geometry.minus_fillet_transition = minus_contact;
-      } else {
-        const CurveIntersection transition = solve_transition(
-            tooth,
-            Flank::kMinus,
-            true,
-            minus_contact,
-            geometry.minus_fillet_dedendum);
-        geometry.minus_flank_transition = transition.lhs;
-        geometry.minus_fillet_transition = transition.rhs;
-      }
-
-      if (driven_free_plus[index]) {
-        geometry.plus_flank_transition = plus_contact;
-        geometry.plus_fillet_transition = plus_contact;
-      } else {
-        const CurveIntersection transition = solve_transition(
-            tooth,
-            Flank::kPlus,
-            true,
-            plus_contact,
-            geometry.plus_fillet_dedendum);
-        geometry.plus_flank_transition = transition.lhs;
-        geometry.plus_fillet_transition = transition.rhs;
-      }
-
-      const CurveIntersection minus_addendum = solve_addendum_intersection(
-          tooth, Flank::kMinus, true, geometry.minus_flank_transition);
-      geometry.minus_flank_addendum = minus_addendum.lhs;
-      geometry.minus_addendum = minus_addendum.rhs;
-      const CurveIntersection plus_addendum = solve_addendum_intersection(
-          tooth, Flank::kPlus, true, geometry.plus_flank_transition);
-      geometry.plus_flank_addendum = plus_addendum.lhs;
-      geometry.plus_addendum = plus_addendum.rhs;
-      driven_geometry[index] = geometry;
-    }
-  }
-
-  void append_curve(
-      std::vector<Point>& outline,
-      const CurveFunction& curve,
-      double start,
-      double end,
-      int samples_per_radian) {
-    const int samples = std::max(
-        4,
+      int samples_per_radian,
+      int& phase_count_out) {
+    const double open_padding =
+        2.5 * (active_end - active_start) / static_cast<double>(drive_teeth);
+    const double cycle_start =
+        is_closed() ? active_start
+                    : std::max(domain_start(), active_start - open_padding);
+    const double cycle_end =
+        is_closed()
+            ? active_start + (driven ? driven_cycle : drive_cycle)
+            : std::min(domain_end(), active_end + open_padding);
+    const int teeth = driven ? driven_teeth : drive_teeth;
+    const double span = cycle_end - cycle_start;
+    const int phases_per_tooth = 24;
+    const int phase_count = std::max(
+        phases_per_tooth * teeth,
         static_cast<int>(
-            std::ceil(std::abs(end - start) * static_cast<double>(samples_per_radian))));
-    for (int index = 0; index <= samples; ++index) {
-      const double fraction = static_cast<double>(index) / static_cast<double>(samples);
-      const Point point = to_point(curve(std::lerp(start, end, fraction)));
-      if (!outline.empty() && index == 0) {
-        maximum_join_gap = std::max(maximum_join_gap, point_distance(outline.back(), point));
-      }
-      if (outline.empty() || point_distance(outline.back(), point) > 1e-10) {
-        outline.push_back(point);
-      }
-    }
-  }
+            std::ceil(std::abs(span) * static_cast<double>(samples_per_radian))));
+    phase_count_out = phase_count;
 
-  bool append_clipped_curve(
-      std::vector<Point>& outline,
-      const CurveFunction& curve,
-      double start,
-      double end,
-      int samples_per_radian) {
-    const double low = std::max(std::min(start, end), active_start);
-    const double high = std::min(std::max(start, end), active_end);
-    if (low >= high) {
-      return false;
-    }
-    std::vector<Point> piece;
-    if (start <= end) {
-      append_curve(piece, curve, low, high, samples_per_radian);
-    } else {
-      append_curve(piece, curve, high, low, samples_per_radian);
-    }
-    if (piece.empty()) {
-      return false;
-    }
-    for (const Point& point : piece) {
-      if (outline.empty() || point_distance(outline.back(), point) > 1e-10) {
-        outline.push_back(point);
-      }
-    }
-    return true;
-  }
+    const double pitch = kPi * config.module;
+    const double blank_radius =
+        maximum_pitch_radius + addendum + 2.5 * config.module;
+    const double rack_half_width = 2.4 * blank_radius + 2.0 * pitch;
+    const double rack_top = 2.5 * blank_radius + pitch;
+    const double sweep_margin = 2e-4 * config.module;
 
-  std::vector<Point> build_drive_outline(int samples_per_radian) {
-    std::vector<Point> outline;
-    const int first = drive_first_tooth();
-    const int last = drive_last_tooth();
-    for (int tooth = first; tooth <= last; ++tooth) {
-      const DriveGeometry& geometry = drive_geometry[static_cast<std::size_t>(tooth)];
-      const auto append = [this, &outline, samples_per_radian](
-                              const CurveFunction& curve,
-                              double start,
-                              double end) {
-        if (is_closed()) {
-          append_curve(outline, curve, start, end, samples_per_radian);
-        } else {
-          append_clipped_curve(outline, curve, start, end, samples_per_radian);
-        }
-      };
-      append(
-          [this, tooth](double phi) {
-            return drive_fillet(tooth, Flank::kMinus, phi);
-          },
-          geometry.minus_fillet_dedendum,
-          geometry.minus_fillet_transition);
-      append(
-          [this, tooth](double phi) {
-            return drive_flank(tooth, Flank::kMinus, phi);
-          },
-          geometry.minus_flank_transition,
-          geometry.minus_flank_addendum);
-      append(
-          [this](double phi) { return drive_addendum(phi); },
-          geometry.minus_addendum,
-          geometry.plus_addendum);
-      append(
-          [this, tooth](double phi) {
-            return drive_flank(tooth, Flank::kPlus, phi);
-          },
-          geometry.plus_flank_addendum,
-          geometry.plus_flank_transition);
-      append(
-          [this, tooth](double phi) {
-            return drive_fillet(tooth, Flank::kPlus, phi);
-          },
-          geometry.plus_fillet_transition,
-          geometry.plus_fillet_dedendum);
-
-      const int next_tooth =
-          is_closed() ? (tooth + 1) % drive_teeth : tooth + 1;
-      double next_parameter =
-          drive_geometry[static_cast<std::size_t>(next_tooth)].minus_fillet_dedendum;
-      if (is_closed() && next_tooth == 0) {
-        next_parameter += drive_cycle;
-      }
-      append(
-          [this](double phi) { return drive_dedendum(phi); },
-          geometry.plus_fillet_dedendum,
-          next_parameter);
-    }
-    if (is_closed()) {
-      close_outline(outline);
-    } else {
-      close_open_outline(
-          outline,
-          [this](double phi) { return 0.25 * drive_centrode(phi); },
-          samples_per_radian);
-    }
-    return outline;
-  }
-
-  std::vector<Point> build_driven_outline(int samples_per_radian) {
-    std::vector<Point> outline;
-    const int first = driven_first_tooth();
-    const int last = driven_last_tooth();
-    for (int tooth = first; tooth <= last; ++tooth) {
-      const DrivenGeometry& geometry = driven_geometry[static_cast<std::size_t>(tooth)];
-      const auto append = [this, &outline, samples_per_radian](
-                              const CurveFunction& curve,
-                              double start,
-                              double end) {
-        if (is_closed()) {
-          append_curve(outline, curve, start, end, samples_per_radian);
-        } else {
-          append_clipped_curve(outline, curve, start, end, samples_per_radian);
-        }
-      };
-      append(
-          [this, tooth](double phi) {
-            return driven_flank(tooth, Flank::kMinus, phi);
-          },
-          geometry.minus_flank_addendum,
-          geometry.minus_flank_transition);
-      append(
-          [this, tooth](double phi) {
-            return driven_fillet(tooth, Flank::kMinus, phi);
-          },
-          geometry.minus_fillet_transition,
-          geometry.minus_fillet_dedendum);
-      append(
-          [this](double phi) { return driven_dedendum(phi); },
-          geometry.minus_fillet_dedendum,
-          geometry.plus_fillet_dedendum);
-      append(
-          [this, tooth](double phi) {
-            return driven_fillet(tooth, Flank::kPlus, phi);
-          },
-          geometry.plus_fillet_dedendum,
-          geometry.plus_fillet_transition);
-      append(
-          [this, tooth](double phi) {
-            return driven_flank(tooth, Flank::kPlus, phi);
-          },
-          geometry.plus_flank_transition,
-          geometry.plus_flank_addendum);
-
-      const int next_tooth =
-          is_closed() ? (tooth + 1) % driven_teeth : tooth + 1;
-      double next_parameter =
-          driven_geometry[static_cast<std::size_t>(next_tooth)].minus_addendum;
-      if (is_closed() && next_tooth == 0) {
-        next_parameter += driven_cycle;
-      }
-      append(
-          [this](double phi) { return driven_addendum(phi); },
-          geometry.plus_addendum,
-          next_parameter);
-    }
-    if (is_closed()) {
-      close_outline(outline);
-    } else {
-      close_open_outline(
-          outline,
-          [this](double phi) { return 0.25 * driven_centrode(phi); },
-          samples_per_radian);
-    }
-    return outline;
-  }
-
-  void close_outline(std::vector<Point>& outline) {
-    if (outline.size() < 3) {
-      throw std::runtime_error("Generated outline has too few points.");
-    }
-    const double seam_gap = point_distance(outline.back(), outline.front());
-    maximum_join_gap = std::max(maximum_join_gap, seam_gap);
-    if (seam_gap <= 2e-6) {
-      outline.back() = outline.front();
-    } else {
-      outline.push_back(outline.front());
-    }
-  }
-
-  void close_open_outline(
-      std::vector<Point>& outline,
-      const CurveFunction& inner_boundary,
-      int samples_per_radian) {
-    if (outline.size() < 3) {
-      throw std::runtime_error("Generated open outline has too few points.");
-    }
-    std::vector<Point> backing;
-    append_curve(
-        backing,
-        inner_boundary,
-        active_end,
-        active_start,
-        samples_per_radian);
-    for (const Point& point : backing) {
-      if (point_distance(outline.back(), point) > 1e-10) {
-        outline.push_back(point);
-      }
-    }
-    if (point_distance(outline.back(), outline.front()) > 1e-12) {
-      outline.push_back(outline.front());
-    } else {
-      outline.back() = outline.front();
-    }
-  }
-
-  GenerationResult run(int samples_per_radian) {
-    if (samples_per_radian < 20) {
-      throw std::invalid_argument("samples_per_radian must be at least 20.");
-    }
-    validate_centrodes();
-    solve_chis();
-    solve_checkpoints();
-    solve_drive_geometry();
-    solve_driven_geometry();
-    std::vector<Point> drive = build_drive_outline(samples_per_radian);
-    std::vector<Point> driven = build_driven_outline(samples_per_radian);
-
-    if (!is_simple_closed_polygon(drive)) {
-      throw std::runtime_error(
-          "Drive outline is not a simple CGAL polygon: " +
-          self_intersection_description(drive));
-    }
-    if (!is_simple_closed_polygon(driven)) {
-      throw std::runtime_error(
-          "Driven outline is not a simple CGAL polygon: " +
-          self_intersection_description(driven));
-    }
-    if (std::abs(signed_polygon_area(drive)) < 1e-8 ||
-        std::abs(signed_polygon_area(driven)) < 1e-8) {
-      throw std::runtime_error("Generated outline has zero area.");
-    }
-    if (maximum_join_gap > 2e-6) {
-      throw std::runtime_error("Generated curve pieces do not join continuously.");
-    }
-    double overlap_area = 0.0;
-    const int phase_count = is_closed() ? 12 : 8;
-    for (int phase_index = 0; phase_index < phase_count; ++phase_index) {
+    ExactPolygonSet gear;
+    gear.insert(make_circle_polygon(blank_radius, 1024));
+    for (int index = 0; index < phase_count; ++index) {
       const double fraction =
-          static_cast<double>(phase_index) / static_cast<double>(phase_count);
+          static_cast<double>(index) / static_cast<double>(phase_count);
+      const double phi = std::lerp(cycle_start, cycle_end, fraction);
+      const double common_arc =
+          center_distance * integral.integral(active_start, phi);
+      const Complex pitch_point =
+          driven ? driven_centrode(phi) : drive_centrode(phi);
+      const Complex tangent =
+          driven ? driven_tangent(phi) : drive_tangent(phi);
+      const Complex outward_normal =
+          driven ? Complex(0.0, -1.0) * tangent
+                 : Complex(0.0, 1.0) * tangent;
+      const double phase_offset = driven ? 0.0 : 0.5 * pitch;
+      const std::vector<Complex> rack = make_rack(
+          common_arc,
+          phase_offset,
+          rack_half_width,
+          rack_top,
+          sweep_margin);
+      const ExactPolygon cutter = transform_rack_polygon(
+          rack, pitch_point, tangent, outward_normal);
+      if (!cutter.is_simple()) {
+        throw std::runtime_error("Generated rack cutter pose is not simple.");
+      }
+      gear.difference(cutter);
+    }
+
+    if (!is_closed()) {
+      double start_angle = 0.0;
+      double end_angle = 0.0;
+      if (driven) {
+        start_angle = psi(config.transmission.active_start) + kPi;
+        end_angle = psi(config.transmission.active_end) + kPi;
+      } else {
+        start_angle = -config.transmission.active_start;
+        end_angle = -config.transmission.active_end;
+      }
+      if (std::abs(end_angle - start_angle) >= 2.0 * kPi - 1e-8) {
+        throw std::invalid_argument(
+            "Open gear body span must be less than one body revolution.");
+      }
+      const double inner_radius =
+          std::max(0.08 * config.module, 0.22 * minimum_pitch_radius);
+      gear.intersection(
+          make_open_sector(start_angle, end_angle, inner_radius, blank_radius));
+    }
+
+    std::list<ExactPolygonWithHoles> components;
+    gear.polygons_with_holes(std::back_inserter(components));
+    if (components.empty()) {
+      throw std::runtime_error("Cutter sweep removed the entire gear blank.");
+    }
+    const auto selected = std::max_element(
+        components.begin(),
+        components.end(),
+        [](const ExactPolygonWithHoles& lhs, const ExactPolygonWithHoles& rhs) {
+          return exact_component_area(lhs) < exact_component_area(rhs);
+        });
+    if (selected->outer_boundary().size() < 3) {
+      throw std::runtime_error("Cutter sweep produced an empty outer boundary.");
+    }
+    return simplify_outline(
+        selected->outer_boundary(),
+        2e-7 * std::max(1.0, config.module));
+  }
+
+  std::vector<Point> generate_conjugate_mate(
+      const std::vector<Point>& master_outline,
+      int samples_per_radian,
+      int& phase_count_out) {
+    const double open_padding =
+        2.5 * (active_end - active_start) / static_cast<double>(drive_teeth);
+    const double cycle_start =
+        is_closed() ? active_start
+                    : std::max(domain_start(), active_start - open_padding);
+    const double cycle_end =
+        is_closed() ? active_start + driven_cycle
+                    : std::min(domain_end(), active_end + open_padding);
+    const double span = cycle_end - cycle_start;
+    const int phase_count = std::max(
+        24 * driven_teeth,
+        static_cast<int>(
+            std::ceil(std::abs(span) *
+                      static_cast<double>(samples_per_radian))));
+    phase_count_out = phase_count;
+
+    const double blank_radius =
+        maximum_pitch_radius + addendum + 2.5 * config.module;
+    ExactPolygonSet gear;
+    gear.insert(make_circle_polygon(blank_radius, 1024));
+    const std::vector<Point> master = simplify_closed_for_sweep(
+        master_outline, 2e-4 * std::max(1.0, config.module));
+
+    for (int index = 0; index < phase_count; ++index) {
+      const double fraction =
+          static_cast<double>(index) / static_cast<double>(phase_count);
+      const double phi = std::lerp(cycle_start, cycle_end, fraction);
+      const double drive_delta = phi - active_start;
+      const double driven_delta = psi(phi) - psi(active_start);
+      const Complex rotation = cis(drive_delta + driven_delta);
+      const Complex translation =
+          -center_distance * cis(driven_delta);
+      ExactPolygon cutter;
+      for (std::size_t point_index = 0;
+           point_index + 1 < master.size();
+           ++point_index) {
+        const Complex point(master[point_index].x(), master[point_index].y());
+        cutter.push_back(to_exact_point(translation + rotation * point));
+      }
+      if (cutter.orientation() == CGAL::CLOCKWISE) {
+        cutter.reverse_orientation();
+      }
+      if (!cutter.is_simple()) {
+        throw std::runtime_error(
+            "Simplified master gear is not a valid conjugate cutter.");
+      }
+      gear.difference(cutter);
+    }
+
+    if (!is_closed()) {
+      const double start_angle =
+          psi(config.transmission.active_start) + kPi;
+      const double end_angle =
+          psi(config.transmission.active_end) + kPi;
+      const double inner_radius =
+          std::max(0.08 * config.module, 0.22 * minimum_pitch_radius);
+      gear.intersection(
+          make_open_sector(start_angle, end_angle, inner_radius, blank_radius));
+    }
+
+    std::list<ExactPolygonWithHoles> components;
+    gear.polygons_with_holes(std::back_inserter(components));
+    if (components.empty()) {
+      throw std::runtime_error(
+          "Conjugate sweep removed the entire mate gear blank.");
+    }
+    const auto selected = std::max_element(
+        components.begin(),
+        components.end(),
+        [](const ExactPolygonWithHoles& lhs,
+           const ExactPolygonWithHoles& rhs) {
+          return exact_component_area(lhs) < exact_component_area(rhs);
+        });
+    return simplify_outline(
+        selected->outer_boundary(),
+        2e-7 * std::max(1.0, config.module));
+  }
+
+  void verify_pair(
+      const std::vector<Point>& drive,
+      const std::vector<Point>& driven) {
+    placed_pair_overlap = 0.0;
+    verification_phase_count =
+        is_closed() ? std::max(64, 4 * std::max(drive_teeth, driven_teeth)) : 48;
+    for (int index = 0; index < verification_phase_count; ++index) {
+      const double fraction =
+          static_cast<double>(index) /
+          static_cast<double>(verification_phase_count - (is_closed() ? 0 : 1));
       const double phi = std::lerp(active_start, active_end, fraction);
-      overlap_area = std::max(
-          overlap_area,
+      placed_pair_overlap = std::max(
+          placed_pair_overlap,
           placed_pair_overlap_area(
               drive,
               driven,
@@ -1720,18 +1115,127 @@ struct GearGenerator::Impl {
               phi - active_start,
               -(psi(phi) - psi(active_start))));
     }
-    const double overlap_tolerance =
-        is_closed()
-            ? 1e-10
-            : 0.25 * config.module * config.module /
-                  std::pow(static_cast<double>(samples_per_radian), 2);
-    if (overlap_area > overlap_tolerance) {
+    const double tolerance =
+        1e-6 * config.module * config.module *
+        static_cast<double>(std::max(drive_teeth, driven_teeth));
+    if (placed_pair_overlap > tolerance) {
       std::ostringstream message;
-      message << "Placed gear solids overlap by area " << overlap_area
-              << ", exceeding the discretization tolerance "
-              << overlap_tolerance << ".";
+      message << "Continuous-phase verification found solid overlap area "
+              << placed_pair_overlap << " above tolerance " << tolerance << '.';
       throw std::runtime_error(message.str());
     }
+
+    const double contact_area_tolerance =
+        1e-11 * config.module * config.module;
+    maximum_transmission_error = 0.0;
+    const int recovery_phase_count = is_closed() ? 6 : 4;
+    for (int index = 0; index < recovery_phase_count; ++index) {
+      const double fraction =
+          (static_cast<double>(index) + 0.37) /
+          static_cast<double>(recovery_phase_count);
+      const double phi = std::lerp(active_start, active_end, fraction);
+      const double drive_angle = phi - active_start;
+      const double desired_driven_angle =
+          -(psi(phi) - psi(active_start));
+      if (placed_pair_overlap_area(
+              drive,
+              driven,
+              center_distance,
+              drive_angle,
+              desired_driven_angle) > contact_area_tolerance) {
+        continue;
+      }
+
+      double best_contact_delta = std::numeric_limits<double>::infinity();
+      for (const double direction : {-1.0, 1.0}) {
+        double clear_delta = 0.0;
+        double collision_delta = 1e-5;
+        bool found = false;
+        while (collision_delta <= 0.08) {
+          const double overlap = placed_pair_overlap_area(
+              drive,
+              driven,
+              center_distance,
+              drive_angle,
+              desired_driven_angle + direction * collision_delta);
+          if (overlap > contact_area_tolerance) {
+            found = true;
+            break;
+          }
+          clear_delta = collision_delta;
+          collision_delta *= 2.0;
+        }
+        if (!found) {
+          continue;
+        }
+        for (int iteration = 0; iteration < 16; ++iteration) {
+          const double midpoint = 0.5 * (clear_delta + collision_delta);
+          const double overlap = placed_pair_overlap_area(
+              drive,
+              driven,
+              center_distance,
+              drive_angle,
+              desired_driven_angle + direction * midpoint);
+          if (overlap > contact_area_tolerance) {
+            collision_delta = midpoint;
+          } else {
+            clear_delta = midpoint;
+          }
+        }
+        best_contact_delta = std::min(best_contact_delta, collision_delta);
+      }
+      if (!std::isfinite(best_contact_delta)) {
+        throw std::runtime_error(
+            "Finished solids do not establish positive contact near the requested motion.");
+      }
+      maximum_transmission_error =
+          std::max(maximum_transmission_error, best_contact_delta);
+    }
+  }
+
+  GenerationResult run(int samples_per_radian) {
+    if (samples_per_radian < 20) {
+      throw std::invalid_argument("samples_per_radian must be at least 20.");
+    }
+    measure_centrodes();
+    int drive_phases = 0;
+    int driven_phases = 0;
+    std::vector<Point> drive =
+        generate_swept_gear(false, samples_per_radian, drive_phases);
+    std::vector<Point> driven =
+        config.profile_family == ProfileFamily::kCycloidalRack
+            ? generate_conjugate_mate(
+                  drive, samples_per_radian, driven_phases)
+            : generate_swept_gear(
+                  true, samples_per_radian, driven_phases);
+    if (!is_simple_closed_polygon(drive) || !is_simple_closed_polygon(driven)) {
+      throw std::runtime_error(
+          "Swept cutter did not produce simple hub-connected gear outlines.");
+    }
+    verify_pair(drive, driven);
+
+    const auto radial_less = [](const Point& lhs, const Point& rhs) {
+      return lhs.x() * lhs.x() + lhs.y() * lhs.y() <
+             rhs.x() * rhs.x() + rhs.y() * rhs.y();
+    };
+    const Point& drive_root =
+        *std::min_element(drive.begin(), drive.end() - 1, radial_less);
+    const Point& driven_root =
+        *std::min_element(driven.begin(), driven.end() - 1, radial_less);
+    const double minimum_root_value = std::min(
+        std::hypot(drive_root.x(), drive_root.y()),
+        std::hypot(driven_root.x(), driven_root.y()));
+    double maximum_ratio = 0.0;
+    for (int index = 0; index <= 4096; ++index) {
+      const double phi = std::lerp(
+          active_start,
+          active_end,
+          static_cast<double>(index) / 4096.0);
+      maximum_ratio = std::max(maximum_ratio, psi1(phi));
+    }
+    const double contact_distance_bound =
+        addendum / std::max(1e-6, std::sin(alpha)) +
+        0.5 * kPi * config.module;
 
     return {
         config,
@@ -1741,19 +1245,28 @@ struct GearGenerator::Impl {
         total_integral,
         center_distance,
         curvature_limit,
-        maximum_join_gap,
-        maximum_intersection_residual,
-        overlap_area,
+        0.0,
+        0.0,
+        placed_pair_overlap,
         centrodes_are_convex,
         maximum_drive_curvature,
         minimum_driven_curvature,
-        checkpoints,
+        drive_phases + driven_phases,
+        verification_phase_count,
+        std::max(drive_cycle / static_cast<double>(drive_phases),
+                 driven_cycle / static_cast<double>(driven_phases)),
+        maximum_transmission_error,
+        (1.0 + maximum_ratio) * contact_distance_bound,
+        minimum_root_value,
+        0.5 * kPi * config.module - 2.0 * addendum * std::tan(alpha),
+        {},
         std::move(drive),
         std::move(driven),
     };
   }
 
   SampleConfig config;
+  MotionLaw motion;
   double alpha = 0.0;
   double addendum = 0.0;
   double dedendum = 0.0;
@@ -1761,7 +1274,6 @@ struct GearGenerator::Impl {
   IntegralTable integral;
   int drive_teeth = 0;
   int driven_teeth = 0;
-  int padding_teeth = 2;
   double active_start = 0.0;
   double active_end = 0.0;
   double drive_cycle = 0.0;
@@ -1769,25 +1281,15 @@ struct GearGenerator::Impl {
   double average_angular_ratio = 1.0;
   double total_integral = 0.0;
   double center_distance = 0.0;
-  double mean_pitch_phi = 0.0;
   double curvature_limit = 0.0;
-  double maximum_join_gap = 0.0;
-  double maximum_intersection_residual = 0.0;
   bool centrodes_are_convex = true;
   double maximum_drive_curvature = 0.0;
   double minimum_driven_curvature = 0.0;
-  std::vector<double> chis;
-  std::vector<double> drive_singular_minus;
-  std::vector<double> drive_singular_plus;
-  std::vector<double> driven_singular_minus;
-  std::vector<double> driven_singular_plus;
-  std::vector<bool> drive_free_minus;
-  std::vector<bool> drive_free_plus;
-  std::vector<bool> driven_free_minus;
-  std::vector<bool> driven_free_plus;
-  std::vector<ToothCheckpoint> checkpoints;
-  std::vector<DriveGeometry> drive_geometry;
-  std::vector<DrivenGeometry> driven_geometry;
+  double maximum_pitch_radius = 0.0;
+  double minimum_pitch_radius = 0.0;
+  double placed_pair_overlap = 0.0;
+  double maximum_transmission_error = 0.0;
+  int verification_phase_count = 0;
 };
 
 std::vector<SampleConfig> builtin_samples() {
@@ -1848,6 +1350,36 @@ std::vector<SampleConfig> builtin_samples() {
           {},
           false,
       },
+      {
+          "nonconvex_inflected",
+          "Nonconvex regression: psi(phi) = phi + 0.18 sin(2 phi)",
+          {{2, 0.18}},
+          32,
+          1.0,
+          20.0,
+          1.0,
+          1.2,
+          0.3,
+          GearTopology::kClosed,
+          {},
+          true,
+      },
+      {
+          "cycloidal_two_lobe",
+          "Cycloidal-rack pair: psi(phi) = phi - 0.08 sin(2 phi)",
+          {{2, -0.08}},
+          28,
+          1.0,
+          20.0,
+          1.0,
+          1.15,
+          0.2,
+          GearTopology::kClosed,
+          {},
+          false,
+          ProfileFamily::kCycloidalRack,
+          0.35,
+      },
   };
 }
 
@@ -1866,8 +1398,7 @@ SampleConfig builtin_sample(const std::string& name) {
 GearGenerator::GearGenerator(SampleConfig config) : config_(std::move(config)) {}
 
 GenerationResult GearGenerator::generate(int samples_per_radian) {
-  Impl implementation(config_);
-  return implementation.run(samples_per_radian);
+  return Impl(config_).run(samples_per_radian);
 }
 
 bool is_simple_closed_polygon(const std::vector<Point>& points) {
@@ -1886,9 +1417,10 @@ double signed_polygon_area(const std::vector<Point>& points) {
   return CGAL::to_double(polygon.area());
 }
 
-void write_result(const GenerationResult& result, const std::filesystem::path& directory) {
+void write_result(
+    const GenerationResult& result,
+    const std::filesystem::path& directory) {
   std::filesystem::create_directories(directory);
-
   const auto write_csv = [](const std::filesystem::path& path,
                             const std::vector<Point>& outline) {
     std::ofstream output(path);
@@ -1910,30 +1442,55 @@ void write_result(const GenerationResult& result, const std::filesystem::path& d
   metadata << std::setprecision(17)
            << "{\n"
            << "  \"name\": \"" << json_escape(result.config.name) << "\",\n"
-           << "  \"description\": \"" << json_escape(result.config.description) << "\",\n"
+           << "  \"description\": \"" << json_escape(result.config.description)
+           << "\",\n"
            << "  \"topology\": \""
            << (result.config.topology == GearTopology::kClosed ? "closed" : "open")
            << "\",\n"
+           << "  \"profile_family\": \""
+           << (result.config.profile_family == ProfileFamily::kCycloidalRack
+                   ? "cycloidal_rack"
+                   : "involute_rack")
+           << "\",\n"
            << "  \"drive_teeth\": " << result.drive_teeth << ",\n"
            << "  \"driven_teeth\": " << result.driven_teeth << ",\n"
-           << "  \"average_angular_ratio\": " << result.average_angular_ratio << ",\n"
+           << "  \"average_angular_ratio\": "
+           << result.average_angular_ratio << ",\n"
            << "  \"module\": " << result.config.module << ",\n"
-           << "  \"pressure_angle_deg\": " << result.config.pressure_angle_deg << ",\n"
+           << "  \"pressure_angle_deg\": "
+           << result.config.pressure_angle_deg << ",\n"
            << "  \"total_integral\": " << result.total_integral << ",\n"
            << "  \"center_distance\": " << result.center_distance << ",\n"
-           << "  \"undercut_curvature_limit\": " << result.undercut_curvature_limit << ",\n"
+           << "  \"undercut_curvature_limit\": "
+           << result.undercut_curvature_limit << ",\n"
            << "  \"maximum_join_gap\": " << result.maximum_join_gap << ",\n"
            << "  \"maximum_intersection_residual\": "
            << result.maximum_intersection_residual << ",\n"
-           << "  \"placed_pair_overlap_area\": " << result.placed_pair_overlap_area << ",\n"
+           << "  \"placed_pair_overlap_area\": "
+           << result.placed_pair_overlap_area << ",\n"
            << "  \"centrodes_are_convex\": "
            << (result.centrodes_are_convex ? "true" : "false") << ",\n"
            << "  \"maximum_drive_curvature\": "
            << result.maximum_drive_curvature << ",\n"
            << "  \"minimum_driven_curvature\": "
            << result.minimum_driven_curvature << ",\n"
-           << "  \"drive_area\": " << signed_polygon_area(result.drive_outline) << ",\n"
-           << "  \"driven_area\": " << signed_polygon_area(result.driven_outline) << "\n"
+           << "  \"cutter_sweep_phase_count\": "
+           << result.cutter_sweep_phase_count << ",\n"
+           << "  \"verification_phase_count\": "
+           << result.verification_phase_count << ",\n"
+           << "  \"sweep_angular_step\": " << result.sweep_angular_step << ",\n"
+           << "  \"maximum_transmission_error\": "
+           << result.maximum_transmission_error << ",\n"
+           << "  \"maximum_sliding_velocity_factor\": "
+           << result.maximum_sliding_velocity_factor << ",\n"
+           << "  \"minimum_root_radius\": "
+           << result.minimum_root_radius << ",\n"
+           << "  \"minimum_tip_thickness\": "
+           << result.minimum_tip_thickness << ",\n"
+           << "  \"drive_area\": "
+           << signed_polygon_area(result.drive_outline) << ",\n"
+           << "  \"driven_area\": "
+           << signed_polygon_area(result.driven_outline) << "\n"
            << "}\n";
 }
 

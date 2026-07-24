@@ -109,7 +109,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--allow-nonconvex",
         action="store_true",
-        help="Attempt locally valid rack envelopes across centrode inflections",
+        help="Deprecated compatibility flag; nonconvex centrodes are supported automatically",
+    )
+    parser.add_argument(
+        "--profile",
+        choices=("involute", "cycloidal"),
+        default="involute",
+        help="Swept rack-cutter profile family",
+    )
+    parser.add_argument(
+        "--cycloidal-rolling-factor",
+        type=float,
+        default=0.35,
+        help="0..1 blend from straight to cycloidal rack flanks",
     )
     parser.add_argument("--samples-per-radian", type=int, default=110)
     parser.add_argument("--out", type=Path, default=root / "out")
@@ -238,6 +250,10 @@ def main(argv: list[str] | None = None) -> int:
         repr(cycle_delta),
         "--samples-per-radian",
         str(args.samples_per_radian),
+        "--profile",
+        args.profile,
+        "--cycloidal-rolling-factor",
+        str(args.cycloidal_rolling_factor),
         "--out",
         str(args.out),
     ]

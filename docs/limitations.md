@@ -1,40 +1,110 @@
-# Geometry limits found by the extended samples
+# Physical and numerical boundaries
 
-The paper's convex-centrode assumptions are sufficient but are not the only
-constraints needed by a rigid noncircular gear pair.
+The generator treats convexity as a diagnostic rather than a construction
+precondition. Inflections and nonconvex centrodes are handled by subtracting
+the global swept cutter solid from a gear blank and selecting the largest
+hub-connected result.
 
-## Driven-cycle symmetry
+## What "general purpose" means
 
-For a closed pair, the transmission derivatives must repeat after the drive
-angle corresponding to one complete driven-gear revolution. A 2:1 average
-ratio therefore accepts a `sin(2*phi)` modulation but rejects `sin(3*phi)`.
-Without this condition, successive revolutions demand different tooth shapes
-from the same driven gear.
+The program either returns a pair that passes its solid checks or rejects the
+requested motion/design parameters with a specific error. It does not imply
+that every mathematical scalar function is physically realizable by one pair
+of fixed-center external gears.
 
-The Python frontend checks this symbolically/numerically. The C++ generator
-checks it again against the sampled table.
+A closed external pair requires:
 
-## Sample-grid alignment
+- a bounded, strictly positive derivative `psi1`
+- a sufficiently smooth motion law
+- rational cycle advance and integral drive/driven tooth counts
+- motion history compatible with both rigid gear revolutions
+- enough root material for a hub-connected solid
+- positive contact without solid interference
 
-The driven-cycle phase shift must land on a sampled phase. The frontend rounds
-the requested closed sample count upward to a multiple implied by the reduced
-tooth ratio. This removed false seam errors in the 5:3 sample.
+Exact dwells (`psi1 == 0`), infinite ratios, ratio reversals, discontinuous
+velocity, irrational closed ratios, and incompatible driven-cycle histories
+require an open segment or a different mechanism topology.
 
-## Missing singularities
+## Surface sliding
 
-The paper's undercut procedure assumes every flank has a directional cusp
-root. High tooth counts and centrode inflections can remove that root. In
-experimental `--allow-nonconvex` mode, absence of a cusp root is treated as an
-undercut-free flank, after which all CGAL trimming and polygon checks still
-apply.
+Conjugacy and surface sliding are different quantities. For an external pair,
+the relative sliding speed at contact point `Q` is proportional to
 
-## Centrode inflections
+```text
+(1 + psi1) * distance(Q, P)
+```
 
-Merely bypassing the convexity check is not sufficient for general nonconvex
-centrodes. The paper's rounded-cutter fillet uses a curvature-dependent normal.
-When curvature changes sign, that normal changes branch; tested examples then
-lost required flank intersections or produced self-intersecting outlines.
+where `P` is the instantaneous pitch point. Ordinary involute and cycloidal
+teeth therefore have zero sliding only as contact crosses the pitch point.
+The generated pair has zero prescribed-motion error in its ideal envelope;
+the metadata also reports a conservative sliding-velocity factor and the
+angular correction at which the tessellated finished solids establish contact.
 
-The generator therefore keeps nonconvex operation opt-in and experimental.
-Supporting arbitrary inflections correctly requires a global swept-cutter
-envelope or equivalent branch-selection method, not just a relaxed sign test.
+## Sampled motion representation
+
+CSV input still contains `psi`, `psi1`, `psi2`, and `psi3` for compatibility.
+Geometry now uses a single piecewise-quintic Hermite motion interpolant
+constrained by `psi`, `psi1`, and `psi2`; all evaluated derivatives through
+third order come from that interpolant. This prevents the mutually
+inconsistent linear interpolation used by the original implementation.
+
+Input samples are assumed to be uniformly spaced. The frontend writes uniform
+samples and aligns a closed sample grid with the reduced tooth ratio.
+
+## Swept-solid approximation
+
+The continuum cutter motion is approximated by dense cutter poses with a small
+conservative inward cutter margin. Regularized Boolean subtraction and
+component selection use CGAL's exact-construction kernel. Metadata records the
+pose count and maximum angular step so downstream tooling can audit the
+resolution.
+
+The finished polygons are checked at at least four phases per tooth over the
+whole requested cycle. Several off-grid phases additionally recover the first
+solid-contact angle on both sides of the requested output angle. This catches
+phase errors that a construction-only check would miss, but it is not a formal
+interval-arithmetic proof over every real-valued phase.
+
+Increase `--samples-per-radian` when:
+
+- tooth scale is very small relative to center distance
+- the motion law has high-frequency content
+- the reported contact correction is too large
+- downstream manufacturing tolerance is close to the sweep step error
+
+## Profile families
+
+`involute` uses a straight-flanked rack with a rounded cutter tip and generates
+both gears with complementary rack phase. `cycloidal` first generates the
+master with a smooth cycloidal-eased rack flank controlled by
+`--cycloidal-rolling-factor`, then generates the mate by sweeping the complete
+finished master solid through the prescribed relative motion. The second
+construction is slower but directly enforces conjugacy for a rack profile that
+is not self-conjugate.
+
+The cycloidal backend is a rack-generated cycloidal family, not a pin-wheel,
+gerotor, or eccentric cycloidal reducer. Those require different relative
+motion and cutter definitions.
+
+## Open segments
+
+Open gears are swept over the active interval plus 2.5 mean tooth pitches of
+padding and then intersected with an annular body sector. The input CSV domain
+must provide at least that much motion padding. Open output is intended for
+finite operating ranges and must not be treated as a closed continuously
+rotating pair.
+
+## Engineering analysis not yet included
+
+The geometry report does not replace:
+
+- Hertzian contact-stress analysis
+- tooth-root bending and fatigue analysis
+- elastic transmission-error analysis
+- lubrication and flash-temperature analysis
+- three-dimensional lead/crowning design
+- shaft, bearing, and housing deflection analysis
+- manufacturing-process validation
+
+Those require load, material, face width, speed, lubrication, and tolerance
+inputs that are outside the present two-dimensional geometry contract.

@@ -24,6 +24,11 @@ enum class GearTopology {
   kOpen,
 };
 
+enum class ProfileFamily {
+  kInvoluteRack,
+  kCycloidalRack,
+};
+
 struct TransmissionSamples {
   double domain_start = 0.0;
   double domain_end = 2.0 * kPi;
@@ -50,6 +55,8 @@ struct SampleConfig {
   GearTopology topology = GearTopology::kClosed;
   TransmissionSamples transmission;
   bool allow_nonconvex_centrodes = false;
+  ProfileFamily profile_family = ProfileFamily::kInvoluteRack;
+  double cycloidal_rolling_factor = 0.35;
 };
 
 struct ToothCheckpoint {
@@ -76,6 +83,13 @@ struct GenerationResult {
   bool centrodes_are_convex = true;
   double maximum_drive_curvature = 0.0;
   double minimum_driven_curvature = 0.0;
+  int cutter_sweep_phase_count = 0;
+  int verification_phase_count = 0;
+  double sweep_angular_step = 0.0;
+  double maximum_transmission_error = 0.0;
+  double maximum_sliding_velocity_factor = 0.0;
+  double minimum_root_radius = 0.0;
+  double minimum_tip_thickness = 0.0;
   std::vector<ToothCheckpoint> checkpoints;
   std::vector<Point> drive_outline;
   std::vector<Point> driven_outline;
