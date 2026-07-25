@@ -18,9 +18,11 @@ void usage() {
   std::cerr
       << "Usage: ncgear_generate [--sample NAME|all] [--out DIRECTORY] "
          "[--samples-per-radian N]\n"
-         "       ncgear_generate --transmission-csv FILE [--open] --name NAME "
+         "       ncgear_generate (--transmission-csv FILE|--centrode-csv FILE) "
+         "[--open] --name NAME "
          "--teeth N --module M --domain-start A --domain-end B "
          "[--active-start A --active-end B] [--period P --cycle-delta D] "
+         "[--centrode-center-distance C] "
          "[--profile involute|cycloidal] [--cycloidal-rolling-factor F]\n";
 }
 
@@ -59,6 +61,41 @@ ncgear::TransmissionSamples read_transmission_csv(
   return samples;
 }
 
+ncgear::CentrodeSamples read_centrode_csv(
+    const std::filesystem::path& path,
+    double domain_start,
+    double domain_end) {
+  std::ifstream input(path);
+  if (!input) {
+    throw std::runtime_error("Unable to open centrode CSV: " + path.string());
+  }
+
+  ncgear::CentrodeSamples samples;
+  samples.domain_start = domain_start;
+  samples.domain_end = domain_end;
+  std::string line;
+  std::getline(input, line);
+  while (std::getline(input, line)) {
+    if (line.empty()) {
+      continue;
+    }
+    std::istringstream row(line);
+    std::array<double, 4> values{};
+    std::string cell;
+    for (double& value : values) {
+      if (!std::getline(row, cell, ',')) {
+        throw std::runtime_error(
+            "Centrode CSV rows must contain four columns.");
+      }
+      value = std::stod(cell);
+    }
+    samples.radius.push_back(values[1]);
+    samples.radius1.push_back(values[2]);
+    samples.radius2.push_back(values[3]);
+  }
+  return samples;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -68,6 +105,7 @@ int main(int argc, char** argv) {
     std::string description = "Sampled transmission";
     std::filesystem::path output = "out";
     std::filesystem::path transmission_csv;
+    std::filesystem::path centrode_csv;
     int samples_per_radian = 110;
     int teeth = 14;
     double module = 1.0;
@@ -81,6 +119,7 @@ int main(int argc, char** argv) {
     double active_end = 2.0 * ncgear::kPi;
     double period = 2.0 * ncgear::kPi;
     double cycle_delta = 2.0 * ncgear::kPi;
+    double centrode_center_distance = 0.0;
     bool open = false;
     bool allow_nonconvex = false;
     ncgear::ProfileFamily profile_family =
@@ -95,6 +134,8 @@ int main(int argc, char** argv) {
         output = argv[++i];
       } else if (argument == "--transmission-csv" && i + 1 < argc) {
         transmission_csv = argv[++i];
+      } else if (argument == "--centrode-csv" && i + 1 < argc) {
+        centrode_csv = argv[++i];
       } else if (argument == "--name" && i + 1 < argc) {
         name = argv[++i];
       } else if (argument == "--description" && i + 1 < argc) {
@@ -123,6 +164,9 @@ int main(int argc, char** argv) {
         period = std::stod(argv[++i]);
       } else if (argument == "--cycle-delta" && i + 1 < argc) {
         cycle_delta = std::stod(argv[++i]);
+      } else if (
+          argument == "--centrode-center-distance" && i + 1 < argc) {
+        centrode_center_distance = std::stod(argv[++i]);
       } else if (argument == "--open") {
         open = true;
       } else if (argument == "--allow-nonconvex") {
@@ -152,7 +196,11 @@ int main(int argc, char** argv) {
     }
 
     std::vector<ncgear::SampleConfig> samples;
-    if (!transmission_csv.empty()) {
+    if (!transmission_csv.empty() && !centrode_csv.empty()) {
+      throw std::invalid_argument(
+          "Specify either --transmission-csv or --centrode-csv, not both.");
+    }
+    if (!transmission_csv.empty() || !centrode_csv.empty()) {
       ncgear::SampleConfig config;
       config.name = name;
       config.description = description;
@@ -164,12 +212,23 @@ int main(int argc, char** argv) {
       config.fillet_factor = fillet_factor;
       config.topology =
           open ? ncgear::GearTopology::kOpen : ncgear::GearTopology::kClosed;
-      config.transmission =
-          read_transmission_csv(transmission_csv, domain_start, domain_end);
-      config.transmission.active_start = active_start;
-      config.transmission.active_end = active_end;
-      config.transmission.period = period;
-      config.transmission.cycle_delta = cycle_delta;
+      if (!transmission_csv.empty()) {
+        config.transmission =
+            read_transmission_csv(transmission_csv, domain_start, domain_end);
+        config.transmission.active_start = active_start;
+        config.transmission.active_end = active_end;
+        config.transmission.period = period;
+        config.transmission.cycle_delta = cycle_delta;
+      } else {
+        config.centrode =
+            read_centrode_csv(centrode_csv, domain_start, domain_end);
+        config.centrode.active_start = active_start;
+        config.centrode.active_end = active_end;
+        config.centrode.period = period;
+        config.centrode.target_cycle_delta = cycle_delta;
+        config.centrode.reference_center_distance =
+            centrode_center_distance;
+      }
       config.allow_nonconvex_centrodes = allow_nonconvex;
       config.profile_family = profile_family;
       config.cycloidal_rolling_factor = cycloidal_rolling_factor;

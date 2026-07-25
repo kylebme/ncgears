@@ -7,6 +7,13 @@ import sys
 from pathlib import Path
 
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from ncgear import generate_from_centrode
+
+
 SAMPLES = [
     {
         "name": "closed_one_to_two_wave",
@@ -58,9 +65,22 @@ SAMPLES = [
     },
 ]
 
+CENTRODE_SAMPLES = [
+    {
+        "name": "centrode_two_lobe",
+        "expression": "1 + 0.08*cos(2*phi)",
+        "teeth": 20,
+    },
+    {
+        "name": "centrode_asymmetric",
+        "expression": "1 + 0.055*cos(phi) - 0.025*sin(2*phi)",
+        "teeth": 24,
+    },
+]
+
 
 def main() -> int:
-    root = Path(__file__).resolve().parents[1]
+    root = ROOT
     parser = argparse.ArgumentParser(
         description="Generate the extended closed/open noncircular gear gallery."
     )
@@ -97,6 +117,18 @@ def main() -> int:
                 ]
             )
         subprocess.run(command, check=True)
+
+    for sample in CENTRODE_SAMPLES:
+        generate_from_centrode(
+            sample["expression"],
+            name=sample["name"],
+            teeth=sample["teeth"],
+            samples=4096,
+            samples_per_radian=90,
+            output_directory=args.out,
+            generator=root / "build" / "ncgear_generate",
+            render=False,
+        )
 
     if not args.no_render:
         subprocess.run(

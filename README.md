@@ -22,6 +22,7 @@ The current pipeline implements:
 - sliding-velocity, root-radius, curvature, and sweep-resolution diagnostics
 - closed unequal-ratio pairs and finite open gear segments
 - sampled motion laws generated from arbitrary SymPy expressions
+- direct polar drive-centrode input, with automatic scale and mate recovery
 
 Built-in samples:
 
@@ -46,6 +47,76 @@ python3 scripts/generate_gallery.py --out out
 
 Each sample directory contains `drive.csv`, `driven.csv`, `metadata.json`,
 `drive.png`, `driven.png`, and `pair.png`.
+
+## Centrode input
+
+Specify the driving gear's centrode directly as a positive polar radius
+`r(phi)`. The radius is a shape in arbitrary units; the generator scales its
+arc length to `teeth * pi * module`. The reference center distance uses the same
+units and controls the angular ratio. If it is omitted, the generator solves it
+for the requested cycle advance (one mate revolution by default):
+
+```bash
+python3 scripts/generate_centrode.py "1 + 0.08*cos(2*phi)" \
+  --name centrode_two_lobe --teeth 20
+
+python3 scripts/generate_centrode.py \
+  "1 + 0.055*cos(phi) - 0.025*sin(2*phi)" \
+  --name centrode_asymmetric --teeth 24
+```
+
+The same mode is available as a Python API:
+
+```python
+from ncgear import generate_from_centrode
+
+directory = generate_from_centrode(
+    "1 + 0.08*cos(2*phi)",
+    name="centrode_two_lobe",
+    teeth=20,
+    output_directory="out",
+)
+```
+
+Unequal tooth counts are selected through the mate's angular advance. For
+example, a fivefold-symmetric 100:40 pair uses a `5:2` advance and the
+conjugate-carved profile:
+
+```python
+import math
+
+directory = generate_from_centrode(
+    "1 + 0.08*cos(5*phi)",
+    name="centrode_five_lobe_5_to_2",
+    teeth=100,
+    target_cycle_delta=5 * math.pi,
+    profile="cycloidal",
+    output_directory="out",
+)
+```
+
+The centrode need not be convex. Very deep concavities can nevertheless make a
+global rack sweep self-occlude and disconnect the intended gear body. Those
+degenerate results are rejected even if a leftover component happens to pass a
+pair-overlap check.
+
+For direct C++/CLI integration, pass a uniformly sampled four-column
+`phi,radius,radius1,radius2` file through `--centrode-csv`. Closed inputs omit
+the duplicate endpoint; open inputs include it and require padding around the
+active interval.
+
+For a broader regression covering a focus-mounted ellipse, the paper reference,
+a Pascal limacon, deep multi-lobed curves, mixed harmonics through order seven,
+and silhouette-inspired rounded-square, heart, teardrop, kidney, triangle,
+crescent, and organic centrodes:
+
+```bash
+python3 scripts/stress_centrodes.py --out out
+```
+
+The command continues after individual failures and writes the inputs,
+diagnostics, rendered pairs, and a machine-readable
+`out/centrode_stress_report.json`.
 
 ## SymPy transmission functions
 

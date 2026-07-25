@@ -216,6 +216,101 @@ void test_incompatible_closed_motion() {
       "not compatible with one driven-gear revolution");
 }
 
+void test_sampled_drive_centrode() {
+  ncgear::SampleConfig config;
+  config.name = "sampled_centrode";
+  config.description = "r(phi) = 1 + 0.08 cos(2 phi)";
+  config.teeth = 20;
+  config.module = 1.0;
+  constexpr int sample_count = 1024;
+  for (int index = 0; index < sample_count; ++index) {
+    const double phi =
+        2.0 * ncgear::kPi * static_cast<double>(index) /
+        static_cast<double>(sample_count);
+    config.centrode.radius.push_back(1.0 + 0.08 * std::cos(2.0 * phi));
+    config.centrode.radius1.push_back(-0.16 * std::sin(2.0 * phi));
+    config.centrode.radius2.push_back(-0.32 * std::cos(2.0 * phi));
+  }
+
+  const ncgear::GenerationResult result =
+      ncgear::GearGenerator(config).generate(20);
+  require(
+      !result.config.centrode.radius.empty(),
+      "centrode input mode was not retained");
+  require(
+      result.config.centrode.reference_center_distance > 1.08,
+      "centrode reference center distance was not solved");
+  require_near(result.average_angular_ratio, 1.0, 1e-8, "centrode ratio");
+  require(result.drive_teeth == result.driven_teeth, "centrode tooth counts");
+  require_valid_result(result, "centrode");
+}
+
+void test_disconnected_deep_centrode_is_rejected() {
+  ncgear::SampleConfig config;
+  config.name = "disconnected_deep_five_lobe";
+  config.description = "r(phi) = 1 + 0.18 cos(5 phi), ratio 5:2";
+  config.teeth = 100;
+  config.module = 1.0;
+  config.profile_family = ncgear::ProfileFamily::kCycloidalRack;
+  config.centrode.target_cycle_delta = 5.0 * ncgear::kPi;
+  constexpr int sample_count = 1024;
+  for (int index = 0; index < sample_count; ++index) {
+    const double phi =
+        2.0 * ncgear::kPi * static_cast<double>(index) /
+        static_cast<double>(sample_count);
+    config.centrode.radius.push_back(1.0 + 0.18 * std::cos(5.0 * phi));
+    config.centrode.radius1.push_back(-0.9 * std::sin(5.0 * phi));
+    config.centrode.radius2.push_back(-4.5 * std::cos(5.0 * phi));
+  }
+
+  require_throws_with(
+      [&config]() { ncgear::GearGenerator(config).generate(20); },
+      "Rack sweep disconnected the intended drive-gear body");
+}
+
+void test_open_sampled_drive_centrode() {
+  constexpr double domain_start = -1.4;
+  constexpr double active_start = 0.0;
+  constexpr double active_end = 2.4;
+  constexpr double domain_end = 3.8;
+  constexpr int sample_count = 1024;
+  ncgear::SampleConfig config;
+  config.name = "open_sampled_centrode";
+  config.description = "Centrode equivalent to psi1 = 1.8 + 0.03 cos(phi)";
+  config.teeth = 12;
+  config.module = 1.0;
+  config.topology = ncgear::GearTopology::kOpen;
+  config.centrode.domain_start = domain_start;
+  config.centrode.domain_end = domain_end;
+  config.centrode.active_start = active_start;
+  config.centrode.active_end = active_end;
+  config.centrode.reference_center_distance = 1.0;
+  for (int index = 0; index < sample_count; ++index) {
+    const double phi = std::lerp(
+        domain_start,
+        domain_end,
+        static_cast<double>(index) /
+            static_cast<double>(sample_count - 1));
+    const double ratio = 1.8 + 0.03 * std::cos(phi);
+    const double ratio1 = -0.03 * std::sin(phi);
+    const double ratio2 = -0.03 * std::cos(phi);
+    const double denominator = 1.0 + ratio;
+    config.centrode.radius.push_back(ratio / denominator);
+    config.centrode.radius1.push_back(
+        ratio1 / (denominator * denominator));
+    config.centrode.radius2.push_back(
+        ratio2 / (denominator * denominator) -
+        2.0 * ratio1 * ratio1 /
+            (denominator * denominator * denominator));
+  }
+
+  const ncgear::GenerationResult result =
+      ncgear::GearGenerator(config).generate(20);
+  require_near(
+      result.average_angular_ratio, 1.80844, 1e-5, "open centrode ratio");
+  require_valid_result(result, "open centrode");
+}
+
 }  // namespace
 
 int main() {
@@ -226,6 +321,9 @@ int main() {
     test_closed_sampled_unequal_ratio();
     test_open_sampled_motion();
     test_incompatible_closed_motion();
+    test_sampled_drive_centrode();
+    test_disconnected_deep_centrode_is_rejected();
+    test_open_sampled_drive_centrode();
     std::cout << "All ncgear tests passed.\n";
     return EXIT_SUCCESS;
   } catch (const std::exception& error) {

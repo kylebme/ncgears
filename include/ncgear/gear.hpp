@@ -42,6 +42,23 @@ struct TransmissionSamples {
   std::vector<double> psi3;
 };
 
+// A polar drive-centrode sampled uniformly in phi. Radius and its first two
+// derivatives may use any consistent reference length: the generated gear is
+// scaled to the requested tooth count and module. If reference_center_distance
+// is zero, it is solved so that the cycle advance is target_cycle_delta.
+struct CentrodeSamples {
+  double domain_start = 0.0;
+  double domain_end = 2.0 * kPi;
+  double active_start = 0.0;
+  double active_end = 2.0 * kPi;
+  double period = 2.0 * kPi;
+  double reference_center_distance = 0.0;
+  double target_cycle_delta = 2.0 * kPi;
+  std::vector<double> radius;
+  std::vector<double> radius1;
+  std::vector<double> radius2;
+};
+
 struct SampleConfig {
   std::string name;
   std::string description;
@@ -57,6 +74,7 @@ struct SampleConfig {
   bool allow_nonconvex_centrodes = false;
   ProfileFamily profile_family = ProfileFamily::kInvoluteRack;
   double cycloidal_rolling_factor = 0.35;
+  CentrodeSamples centrode;
 };
 
 struct ToothCheckpoint {

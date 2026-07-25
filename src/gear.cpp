@@ -289,6 +289,268 @@ class MotionLaw {
   bool closed_ = true;
 };
 
+class CentrodeLaw {
+ public:
+  CentrodeLaw(const CentrodeSamples& samples, bool closed)
+      : samples_(samples), closed_(closed) {}
+
+  double value(double phi, int derivative) const {
+    const std::size_t count = samples_.radius.size();
+    const double domain_length = samples_.domain_end - samples_.domain_start;
+    const double interpolation_length =
+        closed_ ? samples_.period : domain_length;
+    const double step =
+        closed_ ? interpolation_length / static_cast<double>(count)
+                : interpolation_length / static_cast<double>(count - 1);
+
+    double x = phi;
+    if (closed_) {
+      const double cycles =
+          std::floor((phi - samples_.domain_start) / samples_.period);
+      x = phi - cycles * samples_.period;
+      if (x < samples_.domain_start) {
+        x += samples_.period;
+      } else if (x >= samples_.domain_start + samples_.period) {
+        x -= samples_.period;
+      }
+    } else {
+      x = std::clamp(x, samples_.domain_start, samples_.domain_end);
+    }
+
+    const double scaled = (x - samples_.domain_start) / step;
+    int index = static_cast<int>(std::floor(scaled));
+    double t = scaled - static_cast<double>(index);
+    if (!closed_ && index >= static_cast<int>(count) - 1) {
+      index = static_cast<int>(count) - 2;
+      t = 1.0;
+    }
+    index = std::clamp(index, 0, static_cast<int>(count) - 1);
+    const int next =
+        closed_ ? (index + 1) % static_cast<int>(count) : index + 1;
+
+    const double y0 = samples_.radius[static_cast<std::size_t>(index)];
+    const double y1 = samples_.radius[static_cast<std::size_t>(next)];
+    const double d0 = samples_.radius1[static_cast<std::size_t>(index)];
+    const double d1 = samples_.radius1[static_cast<std::size_t>(next)];
+    const double dd0 = samples_.radius2[static_cast<std::size_t>(index)];
+    const double dd1 = samples_.radius2[static_cast<std::size_t>(next)];
+
+    const double a0 = y0;
+    const double a1 = step * d0;
+    const double a2 = 0.5 * step * step * dd0;
+    const double endpoint_value_error = y1 - (a0 + a1 + a2);
+    const double endpoint_slope_error = step * d1 - (a1 + 2.0 * a2);
+    const double endpoint_curvature_error =
+        step * step * dd1 - 2.0 * a2;
+    const double a3 =
+        10.0 * endpoint_value_error - 4.0 * endpoint_slope_error +
+        0.5 * endpoint_curvature_error;
+    const double a4 =
+        -15.0 * endpoint_value_error + 7.0 * endpoint_slope_error -
+        endpoint_curvature_error;
+    const double a5 =
+        6.0 * endpoint_value_error - 3.0 * endpoint_slope_error +
+        0.5 * endpoint_curvature_error;
+
+    if (derivative == 0) {
+      return a0 + t * (a1 + t * (a2 + t * (a3 + t * (a4 + t * a5))));
+    }
+    if (derivative == 1) {
+      return (a1 + t * (2.0 * a2 +
+                        t * (3.0 * a3 +
+                             t * (4.0 * a4 + t * 5.0 * a5)))) /
+             step;
+    }
+    if (derivative == 2) {
+      return (2.0 * a2 +
+              t * (6.0 * a3 + t * (12.0 * a4 + t * 20.0 * a5))) /
+             (step * step);
+    }
+    throw std::invalid_argument(
+        "Centrode derivative order must be between 0 and 2.");
+  }
+
+ private:
+  const CentrodeSamples& samples_;
+  bool closed_ = true;
+};
+
+void validate_centrode_samples(
+    const SampleConfig& config,
+    const CentrodeLaw& law) {
+  const CentrodeSamples& samples = config.centrode;
+  const std::size_t count = samples.radius.size();
+  if (!config.transmission.psi.empty()) {
+    throw std::invalid_argument(
+        "Specify either a transmission function or a centrode, not both.");
+  }
+  if (count < 64 || samples.radius1.size() != count ||
+      samples.radius2.size() != count) {
+    throw std::invalid_argument(
+        "Sampled centrode requires equal radius, radius1 and radius2 arrays "
+        "of at least 64 values.");
+  }
+  if (!(samples.domain_start < samples.domain_end) ||
+      !(samples.period > 0.0)) {
+    throw std::invalid_argument("Sampled centrode domain is invalid.");
+  }
+  if (config.topology == GearTopology::kClosed) {
+    const double expected_end = samples.domain_start + samples.period;
+    if (std::abs(samples.domain_end - expected_end) >
+        1e-8 * std::max(1.0, std::abs(expected_end))) {
+      throw std::invalid_argument(
+          "Closed centrode domain must span exactly one period.");
+    }
+  } else if (
+      !(samples.domain_start < samples.active_start &&
+        samples.active_start < samples.active_end &&
+        samples.active_end < samples.domain_end)) {
+    throw std::invalid_argument(
+        "Open centrode input requires padding on both sides of the active interval.");
+  }
+  if (!(samples.target_cycle_delta > 0.0) ||
+      !std::isfinite(samples.target_cycle_delta)) {
+    throw std::invalid_argument(
+        "Centrode target cycle advance must be positive and finite.");
+  }
+  for (int index = 0; index <= 8192; ++index) {
+    const double phi = std::lerp(
+        samples.domain_start,
+        samples.domain_end,
+        static_cast<double>(index) / 8192.0);
+    const double radius = law.value(phi, 0);
+    if (!(radius > 0.0) || !std::isfinite(radius)) {
+      throw std::invalid_argument(
+          "Centrode radius must stay positive and finite.");
+    }
+  }
+}
+
+SampleConfig materialize_centrode_motion(SampleConfig config) {
+  if (config.centrode.radius.empty()) {
+    return config;
+  }
+  const bool closed = config.topology == GearTopology::kClosed;
+  const CentrodeLaw law(config.centrode, closed);
+  validate_centrode_samples(config, law);
+  const CentrodeSamples& centrode = config.centrode;
+  const double integration_start =
+      closed ? centrode.domain_start : centrode.active_start;
+  const double integration_end =
+      closed ? centrode.domain_start + centrode.period : centrode.active_end;
+
+  double maximum_radius = 0.0;
+  for (int index = 0; index <= 8192; ++index) {
+    const double phi = std::lerp(
+        centrode.domain_start,
+        centrode.domain_end,
+        static_cast<double>(index) / 8192.0);
+    maximum_radius = std::max(maximum_radius, law.value(phi, 0));
+  }
+
+  const auto cycle_advance = [&](double reference_center_distance) {
+    const ScalarFunction ratio = [&](double phi) {
+      const double radius = law.value(phi, 0);
+      return radius / (reference_center_distance - radius);
+    };
+    constexpr int interval_count = 4096;
+    double integral = 0.0;
+    for (int index = 0; index < interval_count; ++index) {
+      const double start = std::lerp(
+          integration_start,
+          integration_end,
+          static_cast<double>(index) /
+              static_cast<double>(interval_count));
+      const double end = std::lerp(
+          integration_start,
+          integration_end,
+          static_cast<double>(index + 1) /
+              static_cast<double>(interval_count));
+      integral += integrate_gauss8(ratio, start, end);
+    }
+    return integral;
+  };
+
+  double reference_center_distance = centrode.reference_center_distance;
+  if (reference_center_distance == 0.0) {
+    double lower = maximum_radius * (1.0 + 1e-10);
+    double upper = std::max(2.0 * maximum_radius, lower + 1.0);
+    while (cycle_advance(upper) > centrode.target_cycle_delta) {
+      upper *= 2.0;
+      if (!std::isfinite(upper)) {
+        throw std::invalid_argument(
+            "Could not solve a finite centrode center distance.");
+      }
+    }
+    for (int iteration = 0; iteration < 80; ++iteration) {
+      const double midpoint = 0.5 * (lower + upper);
+      if (cycle_advance(midpoint) > centrode.target_cycle_delta) {
+        lower = midpoint;
+      } else {
+        upper = midpoint;
+      }
+    }
+    reference_center_distance = 0.5 * (lower + upper);
+  }
+  if (!(reference_center_distance > maximum_radius) ||
+      !std::isfinite(reference_center_distance)) {
+    throw std::invalid_argument(
+        "Centrode reference center distance must exceed its maximum radius.");
+  }
+
+  const std::size_t count = centrode.radius.size();
+  TransmissionSamples transmission;
+  transmission.domain_start = centrode.domain_start;
+  transmission.domain_end = centrode.domain_end;
+  transmission.active_start = centrode.active_start;
+  transmission.active_end = centrode.active_end;
+  transmission.period = centrode.period;
+  transmission.psi.resize(count);
+  transmission.psi1.resize(count);
+  transmission.psi2.resize(count);
+  transmission.psi3.resize(count);
+
+  const double step =
+      closed ? centrode.period / static_cast<double>(count)
+             : (centrode.domain_end - centrode.domain_start) /
+                   static_cast<double>(count - 1);
+  const auto ratio = [&](double phi) {
+    const double radius = law.value(phi, 0);
+    return radius / (reference_center_distance - radius);
+  };
+  const IntegralTable ratio_integral(
+      ratio,
+      centrode.domain_start,
+      centrode.domain_end,
+      closed,
+      std::max(4096, static_cast<int>(count)));
+  const double motion_origin =
+      closed ? centrode.domain_start : centrode.active_start;
+  for (std::size_t index = 0; index < count; ++index) {
+    const double phi =
+        centrode.domain_start + static_cast<double>(index) * step;
+    const double radius = law.value(phi, 0);
+    const double radius1 = law.value(phi, 1);
+    const double radius2 = law.value(phi, 2);
+    const double gap = reference_center_distance - radius;
+    transmission.psi1[index] = radius / gap;
+    transmission.psi2[index] =
+        reference_center_distance * radius1 / (gap * gap);
+    transmission.psi3[index] =
+        reference_center_distance *
+        (radius2 / (gap * gap) +
+         2.0 * radius1 * radius1 / (gap * gap * gap));
+    transmission.psi[index] =
+        ratio_integral.integral(motion_origin, phi);
+  }
+  transmission.cycle_delta = ratio_integral.integral(
+      motion_origin,
+      closed ? motion_origin + centrode.period : centrode.active_end);
+  config.transmission = std::move(transmission);
+  config.centrode.reference_center_distance = reference_center_distance;
+  return config;
+}
+
 std::string json_escape(const std::string& value) {
   std::ostringstream output;
   for (const char character : value) {
@@ -1408,6 +1670,28 @@ struct GearGenerator::Impl {
       throw std::runtime_error(
           "Swept cutter did not produce simple hub-connected gear outlines.");
     }
+    if (is_closed()) {
+      const IntegralTable pitch_area_integral(
+          [this](double phi) {
+            const double radius = drive_radius(phi);
+            return 0.5 * radius * radius;
+          },
+          active_start,
+          active_end,
+          false);
+      const double pitch_area =
+          pitch_area_integral.integral(active_start, active_end);
+      const double outline_area =
+          std::abs(signed_polygon_area(drive));
+      if (outline_area < 0.75 * pitch_area) {
+        std::ostringstream message;
+        message
+            << "Rack sweep disconnected the intended drive-gear body "
+            << "(outline area " << outline_area
+            << ", drive-centrode enclosed area " << pitch_area << ").";
+        throw std::runtime_error(message.str());
+      }
+    }
     verify_pair(drive, driven);
 
     const auto radial_less = [](const Point& lhs, const Point& rhs) {
@@ -1503,6 +1787,9 @@ std::vector<SampleConfig> builtin_samples() {
           GearTopology::kClosed,
           {},
           false,
+          ProfileFamily::kInvoluteRack,
+          0.35,
+          {},
       },
       {
           "two_lobe",
@@ -1517,6 +1804,9 @@ std::vector<SampleConfig> builtin_samples() {
           GearTopology::kClosed,
           {},
           false,
+          ProfileFamily::kInvoluteRack,
+          0.35,
+          {},
       },
       {
           "asymmetric",
@@ -1531,6 +1821,9 @@ std::vector<SampleConfig> builtin_samples() {
           GearTopology::kClosed,
           {},
           false,
+          ProfileFamily::kInvoluteRack,
+          0.35,
+          {},
       },
       {
           "three_lobe",
@@ -1545,6 +1838,9 @@ std::vector<SampleConfig> builtin_samples() {
           GearTopology::kClosed,
           {},
           false,
+          ProfileFamily::kInvoluteRack,
+          0.35,
+          {},
       },
       {
           "nonconvex_inflected",
@@ -1559,6 +1855,9 @@ std::vector<SampleConfig> builtin_samples() {
           GearTopology::kClosed,
           {},
           true,
+          ProfileFamily::kInvoluteRack,
+          0.35,
+          {},
       },
       {
           "cycloidal_two_lobe",
@@ -1575,6 +1874,7 @@ std::vector<SampleConfig> builtin_samples() {
           false,
           ProfileFamily::kCycloidalRack,
           0.35,
+          {},
       },
   };
 }
@@ -1594,7 +1894,7 @@ SampleConfig builtin_sample(const std::string& name) {
 GearGenerator::GearGenerator(SampleConfig config) : config_(std::move(config)) {}
 
 GenerationResult GearGenerator::generate(int samples_per_radian) {
-  return Impl(config_).run(samples_per_radian);
+  return Impl(materialize_centrode_motion(config_)).run(samples_per_radian);
 }
 
 bool is_simple_closed_polygon(const std::vector<Point>& points) {
@@ -1643,6 +1943,13 @@ void write_result(
            << "  \"topology\": \""
            << (result.config.topology == GearTopology::kClosed ? "closed" : "open")
            << "\",\n"
+           << "  \"input_mode\": \""
+           << (result.config.centrode.radius.empty()
+                   ? "transmission"
+                   : "drive_centrode")
+           << "\",\n"
+           << "  \"centrode_reference_center_distance\": "
+           << result.config.centrode.reference_center_distance << ",\n"
            << "  \"profile_family\": \""
            << (result.config.profile_family == ProfileFamily::kCycloidalRack
                    ? "cycloidal_rack"
