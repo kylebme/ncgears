@@ -6,6 +6,85 @@ motion laws. Its centrode equations descend from Uwe Bäsel's paper,
 function"](https://arxiv.org/abs/1905.02642), but tooth construction no longer
 uses the paper's convex-only local branch assembly.
 
+## Relation to existing work
+
+Xu et al.,
+["Computational Design and Optimization of Non-Circular
+Gears"](https://doi.org/10.1111/cgf.13939), address a related but different
+design problem. Their method starts from two target silhouettes, searches for a
+rotation center in each, and modifies their polar boundary functions to obtain
+a compatible closed gear pair. This is useful when resemblance to supplied
+shapes is the primary objective. The present generator instead starts from a
+transmission function or one driving centrode and treats the requested motion
+as fixed. It does not currently optimize rotation centers or similarity to two
+target silhouettes.
+
+The pitch-curve kinematics are substantially the same. If `r_D(phi)` is the
+driving pitch radius and `a` is the fixed center distance, both methods use
+
+```text
+psi1(phi) = r_D(phi) / (a - r_D(phi))
+r_D(phi)  = a * psi1(phi) / (1 + psi1(phi))
+r_F(phi)  = a / (1 + psi1(phi))
+```
+
+Xu et al. solve `a` by imposing the required integral of `psi1` over a drive
+cycle, then integrate and invert the resulting motion to recover the mating
+pitch curve. Direct centrode input in this project performs the same
+center-distance solve and converts the result into the common motion-law
+representation used by the rest of the generator. Consequently, the
+silhouette and rotation-center optimization from Xu et al. could be used as an
+upstream method here: its output transmission derivative or polar centrode is
+compatible with this generator's input.
+
+The tooth constructions are different. The Xu et al. paper describes
+initializing involute teeth on the driver, increasing individual tooth heights
+when needed for continued engagement, and obtaining the follower by
+rotate-and-carve material removal. In the
+[released implementation at revision
+`5654e79`](https://github.com/xuhaocuhk/non-circular-gears/tree/5654e790907cb80d3481f11ccb80ef3482cc6c16),
+the normal execution path instead displaces uniformly sampled boundary points
+by a piecewise sinusoidal function with flat tip and root intervals
+([`teeth_involute_sin`](https://github.com/xuhaocuhk/non-circular-gears/blob/5654e790907cb80d3481f11ccb80ef3482cc6c16/python_dual_gear/gear_tooth.py#L46-L62)).
+That construction is not an involute in the gear-geometric sense: it has no
+base curve, unwinding construction, or rack-generated envelope. The released
+entry path also calls the routine with its torque and continued-engagement
+height adjustments disabled
+([`add_teeth`](https://github.com/xuhaocuhk/non-circular-gears/blob/5654e790907cb80d3481f11ccb80ef3482cc6c16/python_dual_gear/gear_tooth.py#L95-L104)).
+The subsequently carved follower is nevertheless a sampled conjugate envelope
+of that finished driver profile.
+
+This project generates the involute-rack family by sweeping a straight-flanked
+rack cutter with a rounded tip. Its cycloidal-rack family either uses the
+corresponding rack sweep or carves the mate with the complete finished master.
+These choices provide controlled module, pressure angle, addendum, dedendum,
+and root-fillet parameters, but they do not establish that every accepted
+design is suitable under load. Both projects approximate continuous relative
+motion by finitely many poses. This project uses exact-construction Boolean
+operations for the polygons at those poses and performs separate sampled
+overlap and contact-motion checks; those checks reduce numerical ambiguity but
+are not a proof over every continuous phase. Xu et al. report fabricated
+examples, whereas this project does not yet include experimental load,
+efficiency, wear, or lifetime validation.
+
+Conjugacy should not be confused with low sliding. For an external pair, the
+relative sliding speed at a contact point `Q` is proportional to
+`(1 + psi1) * distance(Q, P)`, where `P` is the instantaneous pitch point.
+Sliding is therefore zero only as contact passes through `P`, including for an
+ordinary involute pair. The Xu et al. optimization minimizes silhouette change
+and an idealized peak torque ratio; it does not optimize flank sliding or
+friction. This project reports a conservative sliding-velocity factor but does
+not minimize it or perform a tribological analysis.
+
+The supported domains also differ. The released Xu et al. pipeline is aimed at
+closed periodic silhouette-derived pairs and primarily uses integral cycle
+multiplicity. This project accepts compatible rational closed ratios and finite
+open motion segments. Conversely, Xu et al. provide automatic two-silhouette
+fitting and rotation-center search, which are not implemented here. Both polar
+representations require a single radius for each angle about the selected
+center; silhouette features hidden behind an outer ray intersection cannot be
+preserved exactly by that representation.
+
 The current pipeline implements:
 
 - drive and driven centrodes from a bounded, strictly increasing motion law
