@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(ncgear_paper_samples LANGUAGES CXX)
+project(ncgear VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,6 +17,15 @@ target_link_libraries(ncgear PUBLIC CGAL::CGAL Threads::Threads)
 
 add_executable(ncgear_generate src/main.cpp)
 target_link_libraries(ncgear_generate PRIVATE ncgear)
+
+# Python wheels invoke the generator as a private, bundled executable. Keeping
+# the geometry engine out of the Python process also gives callers useful error
+# isolation for unusually demanding designs.
+install(
+  TARGETS ncgear_generate
+  RUNTIME DESTINATION ncgear/bin
+  COMPONENT python
+)
 
 enable_testing()
 add_executable(ncgear_tests tests/test_gears.cpp)

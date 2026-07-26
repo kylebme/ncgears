@@ -1,5 +1,8 @@
 /build/
 /out/
+/.venv/
+/dist/
+/wheelhouse/
 /.cache/
 .DS_Store
 __pycache__/

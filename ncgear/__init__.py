@@ -1,5 +1,18 @@
-"""Python API for the ncgear generator."""
+"""Python-first conjugate noncircular gear generation."""
 
-from .api import generate_from_centrode
+from .api import generate, generate_from_centrode, generate_from_transmission
+from .errors import GenerationError, GeneratorNotFoundError, NcgearError
+from .native import native_generator
+from .result import GearPair
 
-__all__ = ["generate_from_centrode"]
+__all__ = [
+    "GearPair",
+    "GenerationError",
+    "GeneratorNotFoundError",
+    "NcgearError",
+    "generate",
+    "generate_from_centrode",
+    "generate_from_transmission",
+    "native_generator",
+]
+__version__ = "0.1.0"

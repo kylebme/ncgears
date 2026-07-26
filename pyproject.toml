@@ -1,0 +1,83 @@
+[build-system]
+requires = ["scikit-build-core>=0.11,<0.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "ncgear"
+version = "0.1.0"
+description = "Generate noncircular gears from Python"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-3.0-or-later"
+authors = [{ name = "ncgear contributors" }]
+keywords = ["gear", "noncircular-gear", "cad", "mechanism", "cgal"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Manufacturing",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Scientific/Engineering",
+]
+dependencies = ["numpy>=1.26", "scipy>=1.11", "sympy>=1.12"]
+
+[project.optional-dependencies]
+plot = ["matplotlib>=3.8"]
+test = ["pytest>=8"]
+build = ["build>=1.2", "cibuildwheel>=3.4; python_version >= '3.11'"]
+dev = [
+  "build>=1.2",
+  "cibuildwheel>=3.4; python_version >= '3.11'",
+  "matplotlib>=3.8",
+  "pytest>=8",
+]
+
+[project.scripts]
+ncgear = "ncgear.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/kylebme/geargen5-5"
+Issues = "https://github.com/kylebme/geargen5-5/issues"
+Source = "https://github.com/kylebme/geargen5-5"
+
+[tool.scikit-build]
+cmake.build-type = "Release"
+build.targets = ["ncgear_generate"]
+install.components = ["python"]
+wheel.packages = ["ncgear"]
+wheel.py-api = "py3"
+sdist.include = [
+  "CMakeLists.txt",
+  "LICENSE",
+  "include/ncgear/gear.hpp",
+  "src/gear.cpp",
+  "src/main.cpp",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.cibuildwheel]
+build = ["cp310-*"]
+skip = ["*-musllinux_*", "*-win32"]
+test-command = "python -c \"import subprocess, ncgear; subprocess.run([ncgear.native_generator(), '--help'], check=True)\""
+build-verbosity = 1
+
+[tool.cibuildwheel.linux]
+manylinux-x86_64-image = "manylinux_2_31"
+before-all = "apt-get update && apt-get install -y libcgal-dev libgmp-dev libmpfr-dev"
+
+[tool.cibuildwheel.macos]
+before-all = "brew install cgal"
+
+[tool.cibuildwheel.macos.environment]
+MACOSX_DEPLOYMENT_TARGET = "11.0"
+
+[tool.cibuildwheel.windows]
+before-all = "vcpkg install cgal:x64-windows"
+repair-wheel-command = "delvewheel repair --add-path C:/vcpkg/installed/x64-windows/bin -w {dest_dir} {wheel}"
+
+[tool.cibuildwheel.windows.environment]
+CMAKE_ARGS = "-DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows"
