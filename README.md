@@ -1,11 +1,10 @@
 # ncgear
 
-`ncgear` generates conjugate noncircular gear pairs from a motion law or a
-pitch-curve shape. Its public interface is Python; platform wheels bundle the
-C++/CGAL geometry engine, so users do not need to build or call C++ code.
+`ncgear` generates noncircular gear pairs from a transmission law or a
+pitch-curve shape.
 
 The generator creates 2D outlines, verifies the assembled pair for interference
-and contact-motion error, and exports CSV, SVG, DXF, JSON, and optional PNG
+and contact-motion error, and exports CSV, SVG, DXF, JSON, and PNG
 files. It supports closed gears, finite open segments, nonconvex pitch curves,
 unequal ratios, and involute-rack or cycloidal-rack tooth families.
 
@@ -36,7 +35,21 @@ python -m pip install "ncgear[plot]"
 Prebuilt wheels target 64-bit Linux, Windows, Intel macOS, and Apple Silicon
 macOS. Building from source requires CMake 3.24+, a C++20 compiler, and CGAL.
 
-## Generate a gear pair
+## Command line
+
+Python is the primary API, but a small command is included for quick trials:
+
+```bash
+ncgear "phi - 0.08*sin(2*phi)" --teeth 24 --module 1.5 \
+  --name two_lobe --dxf two_lobe.dxf --render
+
+ncgear "1 + 0.08*cos(2*phi)" --centrode --teeth 20 \
+  --name centrode_two_lobe
+```
+
+Run `ncgear --help` for all commonly used options.
+
+## Basic python usage
 
 Describe the desired relationship between the drive angle `phi` and the driven
 angle. Here the driven gear speeds up and slows down twice per revolution while
@@ -132,19 +145,6 @@ pair = ncgear.generate(
 Open results are only valid over the requested active interval and must not be
 used as continuously rotating closed gears.
 
-## Command line
-
-Python is the primary API, but a small command is included for quick trials:
-
-```bash
-ncgear "phi - 0.08*sin(2*phi)" --teeth 24 --module 1.5 \
-  --name two_lobe --dxf two_lobe.dxf --render
-
-ncgear "1 + 0.08*cos(2*phi)" --centrode --teeth 20 \
-  --name centrode_two_lobe
-```
-
-Run `ncgear --help` for all commonly used options.
 
 ## What is verified
 
@@ -193,9 +193,13 @@ transmission derivative or polar centrode can be passed into ncgear.
 Contributions and reproducible test cases are welcome through the
 [issue tracker](https://github.com/kylebme/geargen5-5/issues).
 
+## Project context
+
+This project contains entirely AI generated code. This project has been my personal benchmark for 
+determining how capable coding models are for over a year, but now they have saturated this benchmark, 
+so I'm releasing the project as an alpha.
+
 ## License
 
 ncgear is distributed under the GNU General Public License v3.0 or later. Its
-2D Boolean geometry uses CGAL's GPL-licensed `Polygon_set_2` package. Projects
-that cannot comply with the GPL need an appropriate commercial CGAL license
-and should review the licensing of ncgear itself with their legal counsel.
+2D Boolean geometry uses CGAL's GPL-licensed `Polygon_set_2` package.
