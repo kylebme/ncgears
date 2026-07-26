@@ -1,5 +1,8 @@
 [build-system]
-requires = ["scikit-build-core>=0.11,<0.12"]
+requires = [
+  "scikit-build-core>=0.11,<0.12",
+  "ninja>=1.11; platform_system == 'Windows'",
+]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -67,7 +70,10 @@ build-verbosity = 1
 
 [tool.cibuildwheel.linux]
 manylinux-x86_64-image = "manylinux_2_28"
-before-all = "dnf install -y epel-release && dnf install -y CGAL-devel gmp-devel mpfr-devel"
+before-all = "dnf install -y epel-release && dnf install -y CGAL-devel boost1.78-devel gmp-devel mpfr-devel"
+
+[tool.cibuildwheel.linux.environment]
+CMAKE_ARGS = "-DBoost_DIR=/usr/lib64/cmake/Boost-1.78.0"
 
 [tool.cibuildwheel.macos]
 before-all = "brew install cgal"
@@ -78,3 +84,4 @@ repair-wheel-command = "delvewheel repair --add-path C:/vcpkg/installed/x64-wind
 
 [tool.cibuildwheel.windows.environment]
 CMAKE_ARGS = "-DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows"
+CMAKE_GENERATOR = "Ninja"
