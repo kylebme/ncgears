@@ -66,14 +66,11 @@ test-command = "python -c \"import subprocess, ncgear; subprocess.run([ncgear.na
 build-verbosity = 1
 
 [tool.cibuildwheel.linux]
-manylinux-x86_64-image = "manylinux_2_31"
-before-all = "apt-get update && apt-get install -y libcgal-dev libgmp-dev libmpfr-dev"
+manylinux-x86_64-image = "manylinux_2_28"
+before-all = "dnf install -y epel-release && dnf install -y CGAL-devel gmp-devel mpfr-devel"
 
 [tool.cibuildwheel.macos]
 before-all = "brew install cgal"
-
-[tool.cibuildwheel.macos.environment]
-MACOSX_DEPLOYMENT_TARGET = "11.0"
 
 [tool.cibuildwheel.windows]
 before-all = "vcpkg install cgal:x64-windows"
