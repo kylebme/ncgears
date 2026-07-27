@@ -52,6 +52,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--samples-per-radian", type=int, default=110)
     parser.add_argument("--output", type=Path, default=Path("out"))
     parser.add_argument("--render", action="store_true")
+    parser.add_argument(
+        "--gif",
+        nargs="?",
+        const=True,
+        type=Path,
+        metavar="PATH",
+        help="render an animated GIF, optionally to PATH",
+    )
+    parser.add_argument("--gif-frames", type=int, default=72)
+    parser.add_argument("--gif-fps", type=int, default=24)
     parser.add_argument("--svg", type=Path, help="also export an assembled SVG")
     parser.add_argument("--dxf", type=Path, help="also export an assembled DXF")
     return parser
@@ -91,6 +101,12 @@ def main(argv: list[str] | None = None) -> int:
             pair.export_svg(args.svg)
         if args.dxf:
             pair.export_dxf(args.dxf)
+        if args.gif:
+            pair.render_gif(
+                None if args.gif is True else args.gif,
+                frames=args.gif_frames,
+                fps=args.gif_fps,
+            )
     except (ncgearsError, ValueError, OSError) as error:
         parser.exit(2, f"ncgears: error: {error}\n")
 

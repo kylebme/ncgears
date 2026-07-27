@@ -33,6 +33,8 @@ def _fixture_pair(directory: Path) -> GearPair:
     )
     metadata = {
         "name": "fixture",
+        "topology": "closed",
+        "input_mode": "transmission",
         "drive_teeth": 16,
         "driven_teeth": 8,
         "average_angular_ratio": 2.0,
@@ -59,6 +61,34 @@ def test_result_loads_and_exports_cad_formats(tmp_path: Path) -> None:
     assert '<polygon id="driven"' in svg.read_text(encoding="utf-8")
     assert "LWPOLYLINE" in dxf.read_text(encoding="ascii")
     assert "$INSUNITS" in dxf.read_text(encoding="ascii")
+
+
+def test_result_renders_animated_gif(tmp_path: Path) -> None:
+    pytest.importorskip("matplotlib")
+    pillow = pytest.importorskip("PIL.Image")
+    pair = _fixture_pair(tmp_path / "fixture")
+    phi = np.linspace(0.0, 2.0 * math.pi, 32, endpoint=False)
+    np.savetxt(
+        pair.directory / "transmission.csv",
+        np.column_stack(
+            (
+                phi,
+                2.0 * phi,
+                np.full_like(phi, 2.0),
+                np.zeros_like(phi),
+                np.zeros_like(phi),
+            )
+        ),
+        delimiter=",",
+        header="phi,psi,psi1,psi2,psi3",
+        comments="",
+    )
+
+    output = pair.render_gif(tmp_path / "pair.gif", frames=5, fps=8, dpi=40)
+
+    assert output.read_bytes().startswith(b"GIF8")
+    with pillow.open(output) as image:
+        assert image.n_frames == 5
 
 
 def test_transmission_frontend_samples_motion_law(tmp_path: Path) -> None:

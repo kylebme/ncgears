@@ -102,6 +102,37 @@ class GearPair:
         render_pair(self, destination)
         return destination.resolve()
 
+    def render_gif(
+        self,
+        output: str | Path | None = None,
+        *,
+        frames: int = 72,
+        fps: int = 24,
+        dpi: int = 100,
+        show_axes: bool = True,
+        show_title: bool = True,
+    ) -> Path:
+        """Render an animated GIF using the generated pair's motion law.
+
+        Install the optional plotting dependency with ``pip install
+        ncgears[plot]``.
+        """
+
+        from .rendering import render_pair_gif
+
+        destination = (
+            Path(output) if output is not None else self.directory / "pair.gif"
+        )
+        return render_pair_gif(
+            self,
+            destination,
+            frames=frames,
+            fps=fps,
+            dpi=dpi,
+            show_axes=show_axes,
+            show_title=show_title,
+        )
+
     def export_svg(
         self,
         output: str | Path,

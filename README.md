@@ -4,11 +4,13 @@
 pitch-curve shape.
 
 The generator creates 2D outlines, verifies the assembled pair for interference
-and contact-motion error, and exports CSV, SVG, DXF, JSON, and PNG
+and contact-motion error, and exports CSV, SVG, DXF, JSON, PNG, and animated GIF
 files. It supports closed gears, finite open segments, nonconvex pitch curves,
 unequal ratios, and involute-rack or cycloidal-rack tooth families.
 The complete application and geometry pipeline are implemented in Python;
 Shapely/GEOS provides robust floating-point polygon operations.
+
+![Animated crazy_kidney_bean gear pair](docs/crazy_kidney_bean.gif)
 
 > **Project status:** alpha. Generated geometry should be reviewed for the
 > intended material, manufacturing process, load, speed, and tolerances.
@@ -19,14 +21,11 @@ Shapely/GEOS provides robust floating-point polygon operations.
 python -m pip install ncgears
 ```
 
-PNG previews are optional:
+PNG and animated GIF previews are optional:
 
 ```bash
 python -m pip install "ncgears[plot]"
 ```
-
-There is no compiler or system-level CGAL dependency. NumPy, SciPy, SymPy, and
-Shapely publish wheels for the commonly used CPython platforms.
 
 ## Command line
 
@@ -34,7 +33,7 @@ Most functionality is available in the CLI:
 
 ```bash
 ncgears "phi - 0.08*sin(2*phi)" --teeth 24 --module 1.5 \
-  --name two_lobe --dxf two_lobe.dxf --render
+  --name two_lobe --dxf two_lobe.dxf --render --gif
 
 ncgears "1 + 0.08*cos(2*phi)" --centrode --teeth 20 \
   --name centrode_two_lobe
@@ -78,6 +77,7 @@ pair.maximum_transmission_error
 pair.metadata                # complete verification report
 pair.directory               # CSV and JSON source files
 pair.render()                # pair.png; requires ncgears[plot]
+pair.render_gif()            # pair.gif; follows the generated motion law
 ```
 
 The output directory defaults to `out/<name>/`. Each successful generation
@@ -134,9 +134,6 @@ pair = ncgears.generate(
     name="finite_segment",
 )
 ```
-
-Open results are only valid over the requested active interval and must not be
-used as continuously rotating closed gears.
 
 
 ## What is verified
