@@ -18,13 +18,13 @@ Shapely/GEOS provides robust floating-point polygon operations.
 ## Install
 
 ```bash
-python -m pip install ncgears
+pip install ncgears
 ```
 
 PNG and animated GIF previews are optional:
 
 ```bash
-python -m pip install "ncgears[plot]"
+pip install "ncgears[plot]"
 ```
 
 ## Command line
@@ -187,7 +187,7 @@ Contributions and reproducible test cases are welcome through the
 ## Project context
 
 This project contains entirely AI generated code. This project has been my personal benchmark for 
-determining how capable coding models are for over a year, but now they have saturated this benchmark, 
+determining how capable coding models are for over a year. Models have saturated this benchmark, 
 so I'm releasing the project as an alpha.
 
 ## License
