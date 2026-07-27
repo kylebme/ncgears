@@ -151,9 +151,12 @@ polygon operations. A successful result includes checks for:
 - sliding-velocity and undercut diagnostics
 
 `metadata.json` records `geometry_backend: "shapely-geos"`, double-precision
-construction, cutter-pose count, and the maximum sweep step. Floating-point
-Boolean error is normally far below the error from discretizing cutter motion;
-increase `samples_per_radian` when a design operates close to its tolerances.
+construction, worker limit, cutter-pose count, and the maximum sweep step.
+Independent involute gear sweeps and verification phases use a bounded thread
+pool of at most eight workers; the dependent cycloidal master/mate sweeps
+remain sequential. Floating-point Boolean error is normally far below the
+error from discretizing cutter motion; increase `samples_per_radian` when a
+design operates close to its tolerances.
 
 These geometry checks are not load-rating or manufacturing certification.
 See [physical and numerical limitations](docs/limitations.md) before fabricating

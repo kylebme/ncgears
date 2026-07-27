@@ -10,7 +10,9 @@ approximation.
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -21,6 +23,7 @@ from shapely import Geometry, make_valid, union_all
 from shapely.geometry import MultiPolygon, Point, Polygon
 
 FloatArray = NDArray[np.float64]
+_MAX_GEOMETRY_WORKERS = max(1, min(8, os.cpu_count() or 1))
 
 
 @dataclass(frozen=True)
@@ -82,6 +85,32 @@ class _QuinticSeries:
         self.step = (
             period / count if periodic else (domain_end - domain_start) / (count - 1)
         )
+        segment_count = count if periodic else count - 1
+        next_index = (np.arange(segment_count) + 1) % count
+        y0 = self.values[:segment_count]
+        y1 = self.values[next_index].copy()
+        if periodic:
+            y1[-1] += cycle_delta
+        d0 = self.first[:segment_count]
+        d1 = self.first[next_index]
+        dd0 = self.second[:segment_count]
+        dd1 = self.second[next_index]
+
+        step = self.step
+        a0 = y0
+        a1 = step * d0
+        a2 = 0.5 * step * step * dd0
+        value_error = y1 - (a0 + a1 + a2)
+        slope_error = step * d1 - (a1 + 2.0 * a2)
+        curvature_error = step * step * dd1 - 2.0 * a2
+        self.coefficients = (
+            a0,
+            a1,
+            a2,
+            10.0 * value_error - 4.0 * slope_error + 0.5 * curvature_error,
+            -15.0 * value_error + 7.0 * slope_error - curvature_error,
+            6.0 * value_error - 3.0 * slope_error + 0.5 * curvature_error,
+        )
 
     def __call__(
         self, value: float | FloatArray, derivative: int = 0
@@ -109,27 +138,10 @@ class _QuinticSeries:
             index = np.where(at_end, count - 2, index)
             t = np.where(at_end, 1.0, t)
         index = np.clip(index, 0, count - 1)
-        next_index = (index + 1) % count if self.periodic else index + 1
-
-        y0 = self.values[index]
-        y1 = self.values[next_index]
-        if self.periodic:
-            y1 = y1 + np.where(next_index == 0, self.cycle_delta, 0.0)
-        d0 = self.first[index]
-        d1 = self.first[next_index]
-        dd0 = self.second[index]
-        dd1 = self.second[next_index]
-
+        a0, a1, a2, a3, a4, a5 = (
+            coefficient[index] for coefficient in self.coefficients
+        )
         step = self.step
-        a0 = y0
-        a1 = step * d0
-        a2 = 0.5 * step * step * dd0
-        value_error = y1 - (a0 + a1 + a2)
-        slope_error = step * d1 - (a1 + 2.0 * a2)
-        curvature_error = step * step * dd1 - 2.0 * a2
-        a3 = 10.0 * value_error - 4.0 * slope_error + 0.5 * curvature_error
-        a4 = -15.0 * value_error + 7.0 * slope_error - curvature_error
-        a5 = 6.0 * value_error - 3.0 * slope_error + 0.5 * curvature_error
 
         if derivative == 0:
             result = a0 + t * (a1 + t * (a2 + t * (a3 + t * (a4 + t * a5))))
@@ -519,6 +531,8 @@ class _GearGenerator:
             self.dedendum - self.fillet_radius * (1.0 - math.sin(self.alpha))
         )
         self._measure_centrodes()
+        self._rack_margin = 2e-4 * config.module
+        self._rack_tooth_template = self._make_tooth_template(self._rack_margin)
 
     def _psi(self, phi: float | FloatArray, derivative: int = 0) -> float | FloatArray:
         return self.motion(phi, derivative)
@@ -578,27 +592,19 @@ class _GearGenerator:
     def _driven_radius(self, phi: float | FloatArray) -> float | FloatArray:
         return self.center_distance / (1.0 + self._psi(phi, 1))
 
-    def _drive_centrode(self, phi: float) -> complex:
-        return float(self._drive_radius(phi)) * np.exp(-1j * phi)
-
-    def _driven_centrode(self, phi: float) -> complex:
-        return -float(self._driven_radius(phi)) * np.exp(1j * float(self._psi(phi)))
-
-    def _drive_tangent(self, phi: float) -> complex:
+    def _rack_pose(self, phi: float, driven: bool) -> tuple[complex, complex]:
         first = float(self._psi(phi, 1))
-        return (
-            complex(float(self._psi(phi, 2)), -first * (1.0 + first))
-            / float(self._w(phi))
-            * np.exp(-1j * phi)
+        second = float(self._psi(phi, 2))
+        tangent_base = complex(second, -first * (1.0 + first)) / math.hypot(
+            second, first * (1.0 + first)
         )
-
-    def _driven_tangent(self, phi: float) -> complex:
-        first = float(self._psi(phi, 1))
-        return (
-            complex(float(self._psi(phi, 2)), -first * (1.0 + first))
-            / float(self._w(phi))
-            * np.exp(1j * float(self._psi(phi)))
-        )
+        if driven:
+            rotation = np.exp(1j * float(self._psi(phi)))
+            pitch_point = -self.center_distance / (1.0 + first) * rotation
+        else:
+            rotation = np.exp(-1j * phi)
+            pitch_point = self.center_distance * first / (1.0 + first) * rotation
+        return pitch_point, tangent_base * rotation
 
     def _drive_curvature(self, phi: FloatArray) -> FloatArray:
         first = np.asarray(self._psi(phi, 1))
@@ -643,9 +649,7 @@ class _GearGenerator:
             and self.minimum_driven_curvature >= -1e-9
         )
 
-    def _append_involute_tooth(
-        self, boundary: list[complex], center: float, margin: float
-    ) -> None:
+    def _involute_tooth_template(self, margin: float) -> NDArray[np.complex128]:
         pitch = math.pi * self.config.module
         tangent = math.tan(self.alpha)
         root_half_width = 0.25 * pitch + self.addendum * tangent
@@ -658,91 +662,72 @@ class _GearGenerator:
         )
         radius = min(max(self.fillet_radius, 0.0), maximum_radius)
         y_shift = -margin
-        boundary.extend(
-            [
-                complex(center - 0.5 * pitch, self.addendum + y_shift),
-                complex(center - root_half_width, self.addendum + y_shift),
-            ]
-        )
+        points = [
+            complex(-0.5 * pitch, self.addendum + y_shift),
+            complex(-root_half_width, self.addendum + y_shift),
+        ]
         if radius <= 1e-12:
-            boundary.extend(
+            points.extend(
                 [
-                    complex(center - sharp_tip_half_width, -self.dedendum + y_shift),
-                    complex(center + sharp_tip_half_width, -self.dedendum + y_shift),
+                    complex(-sharp_tip_half_width, -self.dedendum + y_shift),
+                    complex(sharp_tip_half_width, -self.dedendum + y_shift),
                 ]
             )
         else:
             transition = radius * (1.0 - math.sin(self.alpha)) / math.cos(self.alpha)
             left_center = complex(
-                center - sharp_tip_half_width + transition,
+                -sharp_tip_half_width + transition,
                 -self.dedendum + radius + y_shift,
             )
-            for angle in np.linspace(math.pi + self.alpha, 1.5 * math.pi, 7):
-                boundary.append(left_center + radius * np.exp(1j * angle))
+            left_angles = np.linspace(math.pi + self.alpha, 1.5 * math.pi, 7)
+            points.extend(left_center + radius * np.exp(1j * left_angles))
             right_center = complex(
-                center + sharp_tip_half_width - transition,
+                sharp_tip_half_width - transition,
                 -self.dedendum + radius + y_shift,
             )
-            boundary.append(complex(right_center.real, -self.dedendum + y_shift))
-            for angle in np.linspace(-0.5 * math.pi, -self.alpha, 7):
-                boundary.append(right_center + radius * np.exp(1j * angle))
-        boundary.extend(
+            points.append(complex(right_center.real, -self.dedendum + y_shift))
+            right_angles = np.linspace(-0.5 * math.pi, -self.alpha, 7)
+            points.extend(right_center + radius * np.exp(1j * right_angles))
+        points.extend(
             [
-                complex(center + root_half_width, self.addendum + y_shift),
-                complex(center + 0.5 * pitch, self.addendum + y_shift),
+                complex(root_half_width, self.addendum + y_shift),
+                complex(0.5 * pitch, self.addendum + y_shift),
             ]
         )
+        return np.asarray(points, dtype=np.complex128)
 
-    def _append_cycloidal_tooth(
-        self, boundary: list[complex], center: float, margin: float
-    ) -> None:
+    def _cycloidal_tooth_template(self, margin: float) -> NDArray[np.complex128]:
         pitch = math.pi * self.config.module
         root_half_width = 0.25 * pitch + self.addendum * math.tan(self.alpha)
         tip_half_width = 0.25 * pitch - self.dedendum * math.tan(self.alpha)
         blend = min(max(self.config.cycloidal_rolling_factor, 0.0), 1.0)
         y_shift = -margin
-        boundary.extend(
-            [
-                complex(center - 0.5 * pitch, self.addendum + y_shift),
-                complex(center - root_half_width, self.addendum + y_shift),
-            ]
+        q = np.arange(15, dtype=float) / 14.0
+        tau = math.pi * q
+        x_fraction = (1.0 - blend) * q + blend * ((tau - np.sin(tau)) / math.pi)
+        y_fraction = (1.0 - blend) * q + blend * (0.5 * (1.0 - np.cos(tau)))
+        x = root_half_width + (tip_half_width - root_half_width) * x_fraction
+        y = self.addendum + (-self.dedendum - self.addendum) * y_fraction + y_shift
+        points = np.concatenate(
+            (
+                np.asarray(
+                    [
+                        complex(-0.5 * pitch, self.addendum + y_shift),
+                        complex(-root_half_width, self.addendum + y_shift),
+                    ]
+                ),
+                -x[1:] + 1j * y[1:],
+                np.asarray([complex(tip_half_width, -self.dedendum + y_shift)]),
+                x[:14][::-1] + 1j * y[:14][::-1],
+                np.asarray([complex(0.5 * pitch, self.addendum + y_shift)]),
+            )
         )
-        for index in range(1, 15):
-            q = index / 14.0
-            tau = math.pi * q
-            x_fraction = (1.0 - blend) * q + blend * ((tau - math.sin(tau)) / math.pi)
-            y_fraction = (1.0 - blend) * q + blend * (0.5 * (1.0 - math.cos(tau)))
-            boundary.append(
-                complex(
-                    center
-                    - (
-                        root_half_width
-                        + (tip_half_width - root_half_width) * x_fraction
-                    ),
-                    self.addendum
-                    + (-self.dedendum - self.addendum) * y_fraction
-                    + y_shift,
-                )
-            )
-        boundary.append(complex(center + tip_half_width, -self.dedendum + y_shift))
-        for index in range(13, -1, -1):
-            q = index / 14.0
-            tau = math.pi * q
-            x_fraction = (1.0 - blend) * q + blend * ((tau - math.sin(tau)) / math.pi)
-            y_fraction = (1.0 - blend) * q + blend * (0.5 * (1.0 - math.cos(tau)))
-            boundary.append(
-                complex(
-                    center
-                    + (
-                        root_half_width
-                        + (tip_half_width - root_half_width) * x_fraction
-                    ),
-                    self.addendum
-                    + (-self.dedendum - self.addendum) * y_fraction
-                    + y_shift,
-                )
-            )
-        boundary.append(complex(center + 0.5 * pitch, self.addendum + y_shift))
+        return np.asarray(points, dtype=np.complex128)
+
+    def _make_tooth_template(self, margin: float) -> NDArray[np.complex128]:
+        if self.config.profile == "cycloidal":
+            return self._cycloidal_tooth_template(margin)
+        return self._involute_tooth_template(margin)
 
     def _make_rack(
         self,
@@ -751,45 +736,40 @@ class _GearGenerator:
         half_width: float,
         top: float,
         margin: float,
-    ) -> list[complex]:
+    ) -> NDArray[np.complex128]:
         pitch = math.pi * self.config.module
         first_center = (
             phase_offset
             - common_arc
             + math.floor((-half_width - phase_offset + common_arc) / pitch) * pitch
         )
-        boundary = [complex(first_center - pitch, self.addendum - margin)]
-        center = first_center - 0.5 * pitch
-        while center <= half_width + pitch:
-            if self.config.profile == "cycloidal":
-                self._append_cycloidal_tooth(boundary, center, margin)
-            else:
-                self._append_involute_tooth(boundary, center, margin)
-            center += pitch
-        boundary.extend(
-            [
-                complex(boundary[-1].real, top),
-                complex(boundary[0].real, top),
-            ]
+        center_start = first_center - 0.5 * pitch
+        center_count = math.floor((half_width + pitch - center_start) / pitch) + 1
+        centers = center_start + pitch * np.arange(center_count, dtype=float)
+        template = (
+            self._rack_tooth_template
+            if margin == self._rack_margin
+            else self._make_tooth_template(margin)
         )
+        teeth = (centers[:, None] + template[None, :]).reshape(-1)
+        boundary = np.empty(len(teeth) + 3, dtype=np.complex128)
+        boundary[0] = complex(first_center - pitch, self.addendum - margin)
+        boundary[1:-2] = teeth
+        boundary[-2] = complex(teeth[-1].real, top)
+        boundary[-1] = complex(boundary[0].real, top)
         return boundary
 
     @staticmethod
     def _rack_polygon(
-        local: list[complex],
+        local: NDArray[np.complex128],
         pitch_point: complex,
         tangent: complex,
         outward_normal: complex,
     ) -> Polygon:
-        unique = [local[0]]
-        for point in local[1:]:
-            if abs(point - unique[-1]) > 1e-12:
-                unique.append(point)
-        transformed = [
-            pitch_point + point.real * tangent + point.imag * outward_normal
-            for point in unique
-        ]
-        polygon = Polygon([(point.real, point.imag) for point in transformed])
+        keep = np.concatenate(([True], np.abs(np.diff(local)) > 1e-12))
+        unique = local[keep]
+        transformed = pitch_point + unique.real * tangent + unique.imag * outward_normal
+        polygon = Polygon(np.column_stack((transformed.real, transformed.imag)))
         if not polygon.is_valid:
             polygon = _clean_polygon(make_valid(polygon))
         return polygon
@@ -823,22 +803,14 @@ class _GearGenerator:
         )
         rack_half_width = 2.4 * blank_radius + 2.0 * pitch
         rack_top = 2.5 * blank_radius + pitch
-        sweep_margin = 2e-4 * self.config.module
+        sweep_margin = self._rack_margin
         cutters: list[Polygon] = []
         for phi in np.linspace(cycle_start, cycle_end, phase_count, endpoint=False):
+            phi = float(phi)
             common_arc = self.center_distance * float(
                 self.arc_integral.integral(self.active_start, phi)
             )
-            pitch_point = (
-                self._driven_centrode(float(phi))
-                if driven
-                else self._drive_centrode(float(phi))
-            )
-            tangent = (
-                self._driven_tangent(float(phi))
-                if driven
-                else self._drive_tangent(float(phi))
-            )
+            pitch_point, tangent = self._rack_pose(phi, driven)
             outward_normal = (-1j if driven else 1j) * tangent
             rack = self._make_rack(
                 common_arc,
@@ -943,6 +915,15 @@ class _GearGenerator:
         placed_driven = _transform_outline(driven, driven_angle, self.center_distance)
         return float(placed_drive.intersection(placed_driven).area)
 
+    def _overlap_with_placed_drive(
+        self,
+        placed_drive: Polygon,
+        driven: FloatArray,
+        driven_angle: float,
+    ) -> float:
+        placed_driven = _transform_outline(driven, driven_angle, self.center_distance)
+        return float(placed_drive.intersection(placed_driven).area)
+
     def _verify_pair(
         self, drive: FloatArray, driven: FloatArray
     ) -> tuple[float, float, int]:
@@ -955,19 +936,22 @@ class _GearGenerator:
             else np.linspace(0.0, 1.0, phase_count)
         )
         psi_start = float(self._psi(self.active_start))
-        overlaps = []
-        for fraction in fractions:
+
+        def phase_overlap(fraction: float) -> float:
             phi = self.active_start + (self.active_end - self.active_start) * float(
                 fraction
             )
-            overlaps.append(
-                self._overlap(
-                    drive,
-                    driven,
-                    phi - self.active_start,
-                    -(float(self._psi(phi)) - psi_start),
-                )
+            return self._overlap(
+                drive,
+                driven,
+                phi - self.active_start,
+                -(float(self._psi(phi)) - psi_start),
             )
+
+        with ThreadPoolExecutor(
+            max_workers=min(_MAX_GEOMETRY_WORKERS, phase_count)
+        ) as executor:
+            overlaps = list(executor.map(phase_overlap, fractions))
         maximum_overlap = max(overlaps)
         overlap_tolerance = (
             1e-6 * self.config.module**2 * max(self.drive_teeth, self.driven_teeth)
@@ -979,19 +963,19 @@ class _GearGenerator:
             )
 
         contact_area_tolerance = 1e-11 * self.config.module**2
-        contact_deltas: list[float] = []
         recovery_count = 6 if self.closed else 4
-        for index in range(recovery_count):
+
+        def recover_contact_delta(index: int) -> float:
             fraction = (index + 0.37) / recovery_count
             phi = self.active_start + (self.active_end - self.active_start) * fraction
             drive_angle = phi - self.active_start
             desired = -(float(self._psi(phi)) - psi_start)
+            placed_drive = _transform_outline(drive, drive_angle)
             if (
-                self._overlap(drive, driven, drive_angle, desired)
+                self._overlap_with_placed_drive(placed_drive, driven, desired)
                 > contact_area_tolerance
             ):
-                contact_deltas.append(0.0)
-                continue
+                return 0.0
             best = math.inf
             for direction in (-1.0, 1.0):
                 clear = 0.0
@@ -999,10 +983,9 @@ class _GearGenerator:
                 found = False
                 while collision <= 0.08:
                     if (
-                        self._overlap(
-                            drive,
+                        self._overlap_with_placed_drive(
+                            placed_drive,
                             driven,
-                            drive_angle,
                             desired + direction * collision,
                         )
                         > contact_area_tolerance
@@ -1016,10 +999,9 @@ class _GearGenerator:
                 for _ in range(16):
                     midpoint = 0.5 * (clear + collision)
                     if (
-                        self._overlap(
-                            drive,
+                        self._overlap_with_placed_drive(
+                            placed_drive,
                             driven,
-                            drive_angle,
                             desired + direction * midpoint,
                         )
                         > contact_area_tolerance
@@ -1033,19 +1015,38 @@ class _GearGenerator:
                     "Finished solids do not establish positive contact near "
                     "the requested motion"
                 )
-            contact_deltas.append(best)
+            return best
+
+        with ThreadPoolExecutor(
+            max_workers=min(_MAX_GEOMETRY_WORKERS, recovery_count)
+        ) as executor:
+            contact_deltas = list(
+                executor.map(recover_contact_delta, range(recovery_count))
+            )
         return maximum_overlap, max(contact_deltas), phase_count
 
     def generate(self, samples_per_radian: int) -> EngineResult:
         if samples_per_radian < 20:
             raise ValueError("samples_per_radian must be at least 20")
-        drive, drive_phases = self._generate_swept_gear(False, samples_per_radian)
         if self.config.profile == "cycloidal":
+            drive, drive_phases = self._generate_swept_gear(False, samples_per_radian)
             driven, driven_phases = self._generate_conjugate_mate(
                 drive, samples_per_radian
             )
-        else:
+        elif _MAX_GEOMETRY_WORKERS == 1:
+            drive, drive_phases = self._generate_swept_gear(False, samples_per_radian)
             driven, driven_phases = self._generate_swept_gear(True, samples_per_radian)
+        else:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                driven_future = executor.submit(
+                    self._generate_swept_gear, True, samples_per_radian
+                )
+                # Both rack sweeps are independent, while each gear retains its
+                # original pose and union order.
+                drive, drive_phases = self._generate_swept_gear(
+                    False, samples_per_radian
+                )
+                driven, driven_phases = driven_future.result()
         if self.closed:
             phi = np.linspace(self.active_start, self.active_end, 32769)
             pitch_area = float(
@@ -1080,6 +1081,7 @@ class _GearGenerator:
             "profile_family": f"{self.config.profile}_rack",
             "geometry_backend": "shapely-geos",
             "geometry_precision": "double",
+            "geometry_worker_limit": _MAX_GEOMETRY_WORKERS,
             "drive_teeth": self.drive_teeth,
             "driven_teeth": self.driven_teeth,
             "average_angular_ratio": self.average_ratio,

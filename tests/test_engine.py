@@ -13,6 +13,7 @@ import ncgear
 def _assert_verified_pair(pair: ncgear.GearPair) -> None:
     assert pair.metadata["geometry_backend"] == "shapely-geos"
     assert pair.metadata["geometry_precision"] == "double"
+    assert pair.metadata["geometry_worker_limit"] >= 1
     assert pair.metadata["cutter_sweep_phase_count"] >= 24 * (
         pair.drive_teeth + pair.driven_teeth
     )
