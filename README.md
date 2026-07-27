@@ -1,6 +1,6 @@
-# ncgear
+# ncgears
 
-`ncgear` generates noncircular gear pairs from a transmission law or a
+`ncgears` generates noncircular gear pairs from a transmission law or a
 pitch-curve shape.
 
 The generator creates 2D outlines, verifies the assembled pair for interference
@@ -16,13 +16,13 @@ Shapely/GEOS provides robust floating-point polygon operations.
 ## Install
 
 ```bash
-python -m pip install ncgear
+python -m pip install ncgears
 ```
 
 PNG previews are optional:
 
 ```bash
-python -m pip install "ncgear[plot]"
+python -m pip install "ncgears[plot]"
 ```
 
 There is no compiler or system-level CGAL dependency. NumPy, SciPy, SymPy, and
@@ -30,17 +30,17 @@ Shapely publish wheels for the commonly used CPython platforms.
 
 ## Command line
 
-Python is the primary API, but a small command is included for quick trials:
+Most functionality is available in the CLI:
 
 ```bash
-ncgear "phi - 0.08*sin(2*phi)" --teeth 24 --module 1.5 \
+ncgears "phi - 0.08*sin(2*phi)" --teeth 24 --module 1.5 \
   --name two_lobe --dxf two_lobe.dxf --render
 
-ncgear "1 + 0.08*cos(2*phi)" --centrode --teeth 20 \
+ncgears "1 + 0.08*cos(2*phi)" --centrode --teeth 20 \
   --name centrode_two_lobe
 ```
 
-Run `ncgear --help` for all commonly used options.
+Run `ncgears --help` for all commonly used options.
 
 ## Basic python usage
 
@@ -49,9 +49,9 @@ angle. Here the driven gear speeds up and slows down twice per revolution while
 returning to the same 1:1 average ratio:
 
 ```python
-import ncgear
+import ncgears
 
-pair = ncgear.generate(
+pair = ncgears.generate(
     "phi - 0.08*sin(2*phi)",
     teeth=24,
     module=1.5,
@@ -77,7 +77,7 @@ pair.ratio
 pair.maximum_transmission_error
 pair.metadata                # complete verification report
 pair.directory               # CSV and JSON source files
-pair.render()                # pair.png; requires ncgear[plot]
+pair.render()                # pair.png; requires ncgears[plot]
 ```
 
 The output directory defaults to `out/<name>/`. Each successful generation
@@ -89,7 +89,7 @@ If the drive gear's pitch radius is easier to describe than its motion law, use
 a centrode expression:
 
 ```python
-pair = ncgear.generate_from_centrode(
+pair = ncgears.generate_from_centrode(
     "1 + 0.08*cos(2*phi)",
     teeth=20,
     module=1.0,
@@ -97,7 +97,7 @@ pair = ncgear.generate_from_centrode(
 )
 ```
 
-The radius may use arbitrary units; ncgear scales its arc length to the
+The radius may use arbitrary units; ncgears scales its arc length to the
 requested tooth count and module. By default it solves the center distance for
 one mate revolution. A specific ratio can be selected with
 `target_cycle_delta`. For example, a five-lobed 5:2 angular ratio uses:
@@ -105,7 +105,7 @@ one mate revolution. A specific ratio can be selected with
 ```python
 import math
 
-pair = ncgear.generate_from_centrode(
+pair = ncgears.generate_from_centrode(
     "1 + 0.05*cos(5*phi)",
     teeth=100,
     target_cycle_delta=5 * math.pi,
@@ -120,13 +120,13 @@ Closed gears require a smooth, strictly increasing motion whose cycle advance
 produces an integer mate tooth count. A simple 2:1 pair is:
 
 ```python
-pair = ncgear.generate("2*phi", teeth=20)  # 20 drive teeth, 10 driven teeth
+pair = ncgears.generate("2*phi", teeth=20)  # 20 drive teeth, 10 driven teeth
 ```
 
 Finite, non-repeating motion can be generated as an open segment:
 
 ```python
-pair = ncgear.generate(
+pair = ncgears.generate(
     "1.8*phi + 0.03*sin(phi)",
     open_=True,
     drive_end=2.4,
@@ -159,29 +159,19 @@ error from discretizing cutter motion; increase `samples_per_radian` when a
 design operates close to its tolerances.
 
 These geometry checks are not load-rating or manufacturing certification.
-See [physical and numerical limitations](docs/limitations.md) before fabricating
-a design.
 
 ## Development
 
 ```bash
 python -m pip install -e ".[dev]"
 python -m pytest
-ruff check ncgear tests
+ruff check ncgears tests
 python -m build
 ```
 
 The GitHub Actions workflow tests Python 3.10–3.13, builds a platform-independent
-ncgear wheel, and smoke-tests the installed wheel. Shapely supplies its GEOS
+ncgears wheel, and smoke-tests the installed wheel. Shapely supplies its GEOS
 runtime through its own platform wheels.
-
-### Migrating from 0.1
-
-No generation or export call needs a native executable anymore. Remove
-`generator=...` arguments and `NCGEAR_GENERATOR` configuration from existing
-integrations. The legacy `native_generator()` symbol remains importable only to
-raise an actionable migration error; it no longer locates or launches a binary.
-Generated CSV and JSON layouts and the `GearPair` result API remain compatible.
 
 ## Method and prior work
 
@@ -192,10 +182,10 @@ sweeping a parameterized rack cutter rather than assembling only locally convex
 branches. The silhouette-fitting problem addressed by Xu et al.,
 ["Computational Design and Optimization of Non-Circular
 Gears"](https://doi.org/10.1111/cgf.13939), is complementary: a fitted
-transmission derivative or polar centrode can be passed into ncgear.
+transmission derivative or polar centrode can be passed into ncgears.
 
 Contributions and reproducible test cases are welcome through the
-[issue tracker](https://github.com/kylebme/geargen5-5/issues).
+[issue tracker](https://github.com/kylebme/ncgears/issues).
 
 ## Project context
 
@@ -205,6 +195,4 @@ so I'm releasing the project as an alpha.
 
 ## License
 
-ncgear is distributed under the GNU General Public License v3.0 or later. Its
-2D Boolean geometry uses the BSD-licensed Shapely package and its LGPL-licensed
-GEOS runtime.
+ncgears is distributed under the Apache License 2.0.

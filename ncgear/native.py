@@ -17,6 +17,6 @@ def native_generator(override: str | Path | None = None) -> Path:
 
     del override
     raise GeneratorNotFoundError(
-        "ncgear no longer ships a native generator; call ncgear.generate() "
+        "ncgears no longer ships a native generator; call ncgears.generate() "
         "to use the in-process Python engine"
     )

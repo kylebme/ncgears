@@ -1,7 +1,7 @@
 """Python geometry engine for conjugate noncircular gears.
 
 The kinematics and rack-envelope construction are a direct Python
-implementation of the original ncgear algorithm.  Shapely/GEOS supplies the
+implementation of the original ncgears algorithm.  Shapely/GEOS supplies the
 floating-point regularized polygon operations; the sampled cutter motion, not
 the Boolean predicate representation, remains the dominant geometry
 approximation.

@@ -1,7 +1,7 @@
 """Python-only conjugate noncircular gear generation."""
 
 from .api import generate, generate_from_centrode, generate_from_transmission
-from .errors import GenerationError, GeneratorNotFoundError, NcgearError
+from .errors import GenerationError, GeneratorNotFoundError, ncgearsError
 from .native import native_generator
 from .result import GearPair
 
@@ -9,7 +9,7 @@ __all__ = [
     "GearPair",
     "GenerationError",
     "GeneratorNotFoundError",
-    "NcgearError",
+    "ncgearsError",
     "generate",
     "generate_from_centrode",
     "generate_from_transmission",

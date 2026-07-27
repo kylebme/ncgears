@@ -1,8 +1,8 @@
 """Generate and export a smooth two-lobed 1:1 gear pair."""
 
-import ncgear
+import ncgears
 
-pair = ncgear.generate(
+pair = ncgears.generate(
     "phi - 0.08*sin(2*phi)",
     teeth=24,
     module=1.5,

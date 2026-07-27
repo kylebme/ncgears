@@ -7,12 +7,12 @@ import math
 from pathlib import Path
 
 from .api import generate_from_centrode, generate_from_transmission
-from .errors import NcgearError
+from .errors import ncgearsError
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="ncgear",
+        prog="ncgears",
         description="Generate a verified conjugate noncircular gear pair.",
     )
     parser.add_argument(
@@ -91,8 +91,8 @@ def main(argv: list[str] | None = None) -> int:
             pair.export_svg(args.svg)
         if args.dxf:
             pair.export_dxf(args.dxf)
-    except (NcgearError, ValueError, OSError) as error:
-        parser.exit(2, f"ncgear: error: {error}\n")
+    except (ncgearsError, ValueError, OSError) as error:
+        parser.exit(2, f"ncgears: error: {error}\n")
 
     print(pair.summary())
     print(f"Files: {pair.directory}")

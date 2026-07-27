@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compatibility wrapper for the historical transmission script.
 
-New code should use ``ncgear.generate`` or the installed ``ncgear`` command.
+New code should use ``ncgears.generate`` or the installed ``ncgears`` command.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from ncgear import generate
+from ncgears import generate
 
 
 def build_parser() -> argparse.ArgumentParser:

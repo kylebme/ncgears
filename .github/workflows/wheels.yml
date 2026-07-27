@@ -45,7 +45,7 @@ jobs:
         run: |
           python -m pip install dist/*.whl
           cd /tmp
-          python -c "import ncgear; pair = ncgear.generate('2*phi', teeth=12, samples=1024, samples_per_radian=20, output_directory='/tmp/ncgear-smoke'); assert (pair.drive_teeth, pair.driven_teeth) == (12, 6)"
+          python -c "import ncgears; pair = ncgears.generate('2*phi', teeth=12, samples=1024, samples_per_radian=20, output_directory='/tmp/ncgears-smoke'); assert (pair.drive_teeth, pair.driven_teeth) == (12, 6)"
       - uses: actions/upload-artifact@v4
         with:
           name: distributions

@@ -1,3 +1,3 @@
 # Convenience requirements for repository development. End users should use
-# ``python -m pip install ncgear``.
+# ``python -m pip install ncgears``.
 -e .[dev]

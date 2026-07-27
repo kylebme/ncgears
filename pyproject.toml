@@ -3,13 +3,13 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ncgear"
+name = "ncgears"
 version = "0.2.0"
 description = "Generate noncircular gears with a Python and Shapely geometry engine"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "GPL-3.0-or-later"
-authors = [{ name = "ncgear contributors" }]
+license = "Apache-2.0"
+authors = [{ name = "ncgears contributors" }]
 keywords = ["gear", "noncircular-gear", "cad", "mechanism", "shapely"]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -24,34 +24,24 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
   "Topic :: Scientific/Engineering",
 ]
-dependencies = [
-  "numpy>=1.26",
-  "scipy>=1.12",
-  "shapely>=2.1",
-  "sympy>=1.12",
-]
+dependencies = ["numpy>=1.26", "scipy>=1.12", "shapely>=2.1", "sympy>=1.12"]
 
 [project.optional-dependencies]
 plot = ["matplotlib>=3.8"]
 test = ["pytest>=8"]
 build = ["build>=1.2"]
-dev = [
-  "build>=1.2",
-  "matplotlib>=3.8",
-  "pytest>=8",
-  "ruff>=0.9",
-]
+dev = ["build>=1.2", "matplotlib>=3.8", "pytest>=8", "ruff>=0.9"]
 
 [project.scripts]
-ncgear = "ncgear.cli:main"
+ncgears = "ncgears.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/kylebme/geargen5-5"
-Issues = "https://github.com/kylebme/geargen5-5/issues"
-Source = "https://github.com/kylebme/geargen5-5"
+Homepage = "https://github.com/kylebme/ncgears"
+Issues = "https://github.com/kylebme/ncgears/issues"
+Source = "https://github.com/kylebme/ncgears"
 
 [tool.setuptools.packages.find]
-include = ["ncgear*"]
+include = ["ncgears*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

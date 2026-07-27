@@ -20,7 +20,7 @@ def render_pair(pair: GearPair, output: str | Path) -> Path:
     except ImportError as error:
         raise ImportError(
             "Rendering requires Matplotlib. Install it with "
-            "`python -m pip install 'ncgear[plot]'`."
+            "`python -m pip install 'ncgears[plot]'`."
         ) from error
 
     destination = Path(output).expanduser()

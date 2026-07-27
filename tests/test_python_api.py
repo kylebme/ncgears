@@ -8,8 +8,8 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-import ncgear
-from ncgear.result import GearPair
+import ncgears
+from ncgears.result import GearPair
 
 
 def _fixture_pair(directory: Path) -> GearPair:
@@ -63,8 +63,8 @@ def test_result_loads_and_exports_cad_formats(tmp_path: Path) -> None:
 
 def test_transmission_frontend_samples_motion_law(tmp_path: Path) -> None:
     sentinel = object()
-    with patch("ncgear.api._run_generator", return_value=sentinel) as run:
-        result = ncgear.generate(
+    with patch("ncgears.api._run_generator", return_value=sentinel) as run:
+        result = ncgears.generate(
             "phi - 0.08*sin(2*phi)",
             name="two_lobe",
             teeth=20,
@@ -85,8 +85,8 @@ def test_transmission_frontend_samples_motion_law(tmp_path: Path) -> None:
 
 
 def test_centrode_frontend_samples_radius_and_derivatives(tmp_path: Path) -> None:
-    with patch("ncgear.api._run_generator") as run:
-        ncgear.generate_from_centrode(
+    with patch("ncgears.api._run_generator") as run:
+        ncgears.generate_from_centrode(
             "1 + 0.08*cos(2*phi)",
             name="centrode",
             teeth=20,
@@ -117,7 +117,7 @@ def test_invalid_transmission_is_rejected(
     expression: str, message: str, tmp_path: Path
 ) -> None:
     with pytest.raises(ValueError, match=message):
-        ncgear.generate(
+        ncgears.generate(
             expression,
             samples=1024,
             output_directory=tmp_path,
@@ -126,7 +126,7 @@ def test_invalid_transmission_is_rejected(
 
 def test_result_name_cannot_escape_output_directory(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="name must"):
-        ncgear.generate(
+        ncgears.generate(
             "phi",
             name="../outside",
             samples=1024,

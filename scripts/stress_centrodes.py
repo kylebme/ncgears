@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from ncgear import generate_from_centrode
+from ncgears import generate_from_centrode
 
 
 @dataclass(frozen=True)
@@ -41,10 +41,7 @@ CASES = [
     ),
     StressCase(
         name="stress_basel_reference",
-        expression=(
-            "(1 - (2 - sqrt(2))*cos(phi))"
-            "/(2 - (2 - sqrt(2))*cos(phi))"
-        ),
+        expression=("(1 - (2 - sqrt(2))*cos(phi))/(2 - (2 - sqrt(2))*cos(phi))"),
         teeth=28,
         category="known_transmission",
         reference_center_distance=1.0,
@@ -117,27 +114,21 @@ CASES = [
     ),
     StressCase(
         name="crazy_heart",
-        expression=(
-            "1 + 0.22*sin(phi) + 0.15*cos(2*phi) - 0.025*sin(3*phi)"
-        ),
+        expression=("1 + 0.22*sin(phi) + 0.15*cos(2*phi) - 0.025*sin(3*phi)"),
         teeth=64,
         category="silhouette_inspired",
         note="Heart-like asymmetric pitch shape with a pronounced upper cleft.",
     ),
     StressCase(
         name="crazy_teardrop",
-        expression=(
-            "1 + 0.22*cos(phi) + 0.07*cos(2*phi) - 0.035*cos(3*phi)"
-        ),
+        expression=("1 + 0.22*cos(phi) + 0.07*cos(2*phi) - 0.035*cos(3*phi)"),
         teeth=52,
         category="silhouette_inspired",
         note="Teardrop pitch shape with a narrow and a broad end.",
     ),
     StressCase(
         name="crazy_kidney_bean",
-        expression=(
-            "1 + 0.16*cos(phi) - 0.11*sin(2*phi) + 0.045*cos(3*phi)"
-        ),
+        expression=("1 + 0.16*cos(phi) - 0.11*sin(2*phi) + 0.045*cos(3*phi)"),
         teeth=56,
         category="silhouette_inspired",
         note="Bent kidney/bean pitch shape with broken mirror symmetry.",
@@ -151,9 +142,7 @@ CASES = [
     ),
     StressCase(
         name="crazy_crescent",
-        expression=(
-            "1 + 0.25*cos(phi) - 0.07*cos(2*phi) + 0.03*cos(3*phi)"
-        ),
+        expression=("1 + 0.25*cos(phi) - 0.07*cos(2*phi) + 0.03*cos(3*phi)"),
         teeth=64,
         category="silhouette_inspired",
         note="Strongly eccentric crescent/egg-like pitch shape.",
@@ -161,8 +150,7 @@ CASES = [
     StressCase(
         name="crazy_organic",
         expression=(
-            "1 + 0.10*cos(phi) + 0.08*sin(2*phi) - 0.055*cos(3*phi)"
-            " + 0.035*sin(5*phi)"
+            "1 + 0.10*cos(phi) + 0.08*sin(2*phi) - 0.055*cos(3*phi) + 0.035*sin(5*phi)"
         ),
         teeth=64,
         category="silhouette_inspired",
@@ -274,22 +262,14 @@ def main() -> int:
                     "status": "passed" if quality_passed else "quality_failed",
                     "elapsed_seconds": time.monotonic() - started,
                     "center_distance": metadata["center_distance"],
-                    "average_angular_ratio": metadata[
-                        "average_angular_ratio"
-                    ],
-                    "centrodes_are_convex": metadata[
-                        "centrodes_are_convex"
-                    ],
-                    "placed_pair_overlap_area": metadata[
-                        "placed_pair_overlap_area"
-                    ],
+                    "average_angular_ratio": metadata["average_angular_ratio"],
+                    "centrodes_are_convex": metadata["centrodes_are_convex"],
+                    "placed_pair_overlap_area": metadata["placed_pair_overlap_area"],
                     "maximum_transmission_error": metadata[
                         "maximum_transmission_error"
                     ],
                     "minimum_root_radius": metadata["minimum_root_radius"],
-                    "cutter_sweep_phase_count": metadata[
-                        "cutter_sweep_phase_count"
-                    ],
+                    "cutter_sweep_phase_count": metadata["cutter_sweep_phase_count"],
                 }
             )
             label = "PASS" if quality_passed else "QUALITY_LIMIT"
@@ -317,12 +297,8 @@ def main() -> int:
         "quality_failed": sum(
             record["status"] == "quality_failed" for record in results
         ),
-        "generation_failed": sum(
-            record["status"] == "failed" for record in results
-        ),
-        "unexpected_outcomes": sum(
-            not record["expectation_met"] for record in results
-        ),
+        "generation_failed": sum(record["status"] == "failed" for record in results),
+        "unexpected_outcomes": sum(not record["expectation_met"] for record in results),
         "samples": args.samples,
         "samples_per_radian": args.samples_per_radian,
         "cases": results,

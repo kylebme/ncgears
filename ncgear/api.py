@@ -220,7 +220,9 @@ def _run_generator(
             encoding="utf-8",
         )
     except (ValueError, RuntimeError, OSError) as error:
-        raise GenerationError(f"ncgear could not generate {name!r}: {error}") from error
+        raise GenerationError(
+            f"ncgears could not generate {name!r}: {error}"
+        ) from error
 
     pair = GearPair.load(
         output_root / name,
@@ -417,7 +419,7 @@ def generate_from_centrode(
 
     The radius expression may use arbitrary units. It is scaled so the drive
     pitch length equals ``teeth * pi * module``. When no reference center
-    distance is supplied, ncgear solves one for ``target_cycle_delta``.
+    distance is supplied, ncgears solves one for ``target_cycle_delta``.
     """
 
     _validate_common(

@@ -7,10 +7,10 @@ import numpy as np
 import pytest
 from shapely.geometry import Polygon
 
-import ncgear
+import ncgears
 
 
-def _assert_verified_pair(pair: ncgear.GearPair) -> None:
+def _assert_verified_pair(pair: ncgears.GearPair) -> None:
     assert pair.metadata["geometry_backend"] == "shapely-geos"
     assert pair.metadata["geometry_precision"] == "double"
     assert pair.metadata["geometry_worker_limit"] >= 1
@@ -29,7 +29,7 @@ def _assert_verified_pair(pair: ncgear.GearPair) -> None:
 
 
 def test_python_engine_generates_unequal_ratio_pair(tmp_path: Path) -> None:
-    pair = ncgear.generate(
+    pair = ncgears.generate(
         "2*phi",
         name="ratio_two_to_one",
         teeth=12,
@@ -46,7 +46,7 @@ def test_python_engine_generates_unequal_ratio_pair(tmp_path: Path) -> None:
 
 
 def test_python_engine_solves_centrode_center_distance(tmp_path: Path) -> None:
-    pair = ncgear.generate_from_centrode(
+    pair = ncgears.generate_from_centrode(
         "1 + 0.08*cos(2*phi)",
         name="centrode",
         teeth=12,
@@ -62,7 +62,7 @@ def test_python_engine_solves_centrode_center_distance(tmp_path: Path) -> None:
 
 
 def test_python_engine_generates_open_segment(tmp_path: Path) -> None:
-    pair = ncgear.generate(
+    pair = ncgears.generate(
         "1.8*phi + 0.03*sin(phi)",
         name="open_segment",
         teeth=12,
@@ -84,7 +84,7 @@ def test_python_engine_generates_open_segment(tmp_path: Path) -> None:
 def test_cycloidal_mate_uses_conservative_sampled_envelope(
     tmp_path: Path,
 ) -> None:
-    pair = ncgear.generate(
+    pair = ncgears.generate(
         "phi - 0.08*sin(2*phi)",
         name="cycloidal",
         teeth=28,
@@ -103,7 +103,7 @@ def test_cycloidal_mate_uses_conservative_sampled_envelope(
 
 
 def test_nonconvex_centrode_uses_global_sweep(tmp_path: Path) -> None:
-    pair = ncgear.generate(
+    pair = ncgears.generate(
         "phi + 0.18*sin(2*phi)",
         name="nonconvex",
         teeth=32,

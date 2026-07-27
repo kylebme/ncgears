@@ -91,7 +91,7 @@ class GearPair:
         """Render an assembled PNG preview.
 
         Install the optional plotting dependency with ``pip install
-        ncgear[plot]``.
+        ncgears[plot]``.
         """
 
         from .rendering import render_pair
