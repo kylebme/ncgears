@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import math
 import re
-import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
 import sympy as sp
 
+from .engine import generate_geometry, load_engine_config
 from .errors import GenerationError
-from .native import native_generator
 from .result import GearPair
 
 PHI = sp.Symbol("phi", real=True)
@@ -169,68 +169,62 @@ def _run_generator(
     extra_arguments: Sequence[str] = (),
     render: bool,
 ) -> GearPair:
-    executable = native_generator(generator)
-    command = [
-        str(executable),
-        input_flag,
-        str(input_path),
-        "--name",
-        name,
-        "--description",
-        description,
-        "--teeth",
-        str(teeth),
-        "--module",
-        repr(module),
-        "--pressure-angle-deg",
-        repr(pressure_angle_deg),
-        "--addendum-factor",
-        repr(addendum_factor),
-        "--dedendum-factor",
-        repr(dedendum_factor),
-        "--fillet-factor",
-        repr(fillet_factor),
-        "--domain-start",
-        repr(domain_start),
-        "--domain-end",
-        repr(domain_end),
-        "--active-start",
-        repr(active_start),
-        "--active-end",
-        repr(active_end),
-        "--period",
-        repr(period),
-        "--cycle-delta",
-        repr(cycle_delta),
-        "--samples-per-radian",
-        str(samples_per_radian),
-        "--profile",
-        profile,
-        "--cycloidal-rolling-factor",
-        repr(cycloidal_rolling_factor),
-        "--out",
-        str(output_root),
-        *extra_arguments,
-    ]
-    if open_:
-        command.append("--open")
-
-    completed = subprocess.run(
-        command,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if completed.returncode != 0:
-        detail = completed.stderr.strip() or completed.stdout.strip()
-        raise GenerationError(
-            f"ncgear could not generate {name!r}: "
-            f"{detail or f'generator exited with status {completed.returncode}'}"
+    if generator is not None:
+        raise ValueError(
+            "generator overrides are not supported by the Python-only engine"
         )
+    try:
+        config = load_engine_config(
+            input_flag=input_flag,
+            input_path=input_path,
+            name=name,
+            description=description,
+            teeth=teeth,
+            module=module,
+            pressure_angle_deg=pressure_angle_deg,
+            addendum_factor=addendum_factor,
+            dedendum_factor=dedendum_factor,
+            fillet_factor=fillet_factor,
+            domain_start=domain_start,
+            domain_end=domain_end,
+            active_start=active_start,
+            active_end=active_end,
+            period=period,
+            cycle_delta=cycle_delta,
+            open_=open_,
+            profile=profile,
+            cycloidal_rolling_factor=cycloidal_rolling_factor,
+            extra_arguments=extra_arguments,
+        )
+        result = generate_geometry(config, samples_per_radian)
+        result_directory = output_root / name
+        result_directory.mkdir(parents=True, exist_ok=True)
+        np.savetxt(
+            result_directory / "drive.csv",
+            result.drive_outline,
+            delimiter=",",
+            header="x,y",
+            comments="",
+            fmt="%.17g",
+        )
+        np.savetxt(
+            result_directory / "driven.csv",
+            result.driven_outline,
+            delimiter=",",
+            header="x,y",
+            comments="",
+            fmt="%.17g",
+        )
+        (result_directory / "metadata.json").write_text(
+            json.dumps(result.metadata, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except (ValueError, RuntimeError, OSError) as error:
+        raise GenerationError(f"ncgear could not generate {name!r}: {error}") from error
 
     pair = GearPair.load(
         output_root / name,
-        generator_log=completed.stdout.strip(),
+        generator_log=result.log,
     )
     if render:
         pair.render()

@@ -7,20 +7,13 @@ The generator creates 2D outlines, verifies the assembled pair for interference
 and contact-motion error, and exports CSV, SVG, DXF, JSON, and PNG
 files. It supports closed gears, finite open segments, nonconvex pitch curves,
 unequal ratios, and involute-rack or cycloidal-rack tooth families.
+The complete application and geometry pipeline are implemented in Python;
+Shapely/GEOS provides robust floating-point polygon operations.
 
 > **Project status:** alpha. Generated geometry should be reviewed for the
 > intended material, manufacturing process, load, speed, and tolerances.
 
 ## Install
-
-Download a wheel for your operating system from the latest GitHub Actions run
-or release, then install it with pip:
-
-```bash
-python -m pip install ncgear-0.1.0-*.whl
-```
-
-Once the project is published to PyPI, installation becomes:
 
 ```bash
 python -m pip install ncgear
@@ -32,8 +25,8 @@ PNG previews are optional:
 python -m pip install "ncgear[plot]"
 ```
 
-Prebuilt wheels target 64-bit Linux, Windows, Intel macOS, and Apple Silicon
-macOS. Building from source requires CMake 3.24+, a C++20 compiler, and CGAL.
+There is no compiler or system-level CGAL dependency. NumPy, SciPy, SymPy, and
+Shapely publish wheels for the commonly used CPython platforms.
 
 ## Command line
 
@@ -148,8 +141,8 @@ used as continuously rotating closed gears.
 
 ## What is verified
 
-The native engine uses swept rack-cutter solids and exact-construction polygon
-Boolean operations. A successful result includes checks for:
+The Python engine uses swept rack-cutter solids and Shapely/GEOS regularized
+polygon operations. A successful result includes checks for:
 
 - simple, hub-connected gear bodies
 - sampled whole-cycle solid interference
@@ -157,27 +150,35 @@ Boolean operations. A successful result includes checks for:
 - sweep resolution, root radius, tip thickness, and centrode curvature
 - sliding-velocity and undercut diagnostics
 
+`metadata.json` records `geometry_backend: "shapely-geos"`, double-precision
+construction, cutter-pose count, and the maximum sweep step. Floating-point
+Boolean error is normally far below the error from discretizing cutter motion;
+increase `samples_per_radian` when a design operates close to its tolerances.
+
 These geometry checks are not load-rating or manufacturing certification.
 See [physical and numerical limitations](docs/limitations.md) before fabricating
 a design.
 
 ## Development
 
-On Debian/Ubuntu:
-
 ```bash
-sudo apt-get install cmake libcgal-dev
 python -m pip install -e ".[dev]"
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel
-ctest --test-dir build --output-on-failure
 python -m pytest
+ruff check ncgear tests
 python -m build
 ```
 
-The GitHub Actions workflow runs the Python and C++ tests, then uses
-`cibuildwheel` to produce repaired wheels for Linux, Windows, Intel macOS, and
-Apple Silicon macOS.
+The GitHub Actions workflow tests Python 3.10–3.13, builds a platform-independent
+ncgear wheel, and smoke-tests the installed wheel. Shapely supplies its GEOS
+runtime through its own platform wheels.
+
+### Migrating from 0.1
+
+No generation or export call needs a native executable anymore. Remove
+`generator=...` arguments and `NCGEAR_GENERATOR` configuration from existing
+integrations. The legacy `native_generator()` symbol remains importable only to
+raise an actionable migration error; it no longer locates or launches a binary.
+Generated CSV and JSON layouts and the `GearPair` result API remain compatible.
 
 ## Method and prior work
 
@@ -202,4 +203,5 @@ so I'm releasing the project as an alpha.
 ## License
 
 ncgear is distributed under the GNU General Public License v3.0 or later. Its
-2D Boolean geometry uses CGAL's GPL-licensed `Polygon_set_2` package.
+2D Boolean geometry uses the BSD-licensed Shapely package and its LGPL-licensed
+GEOS runtime.

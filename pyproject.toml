@@ -1,19 +1,16 @@
 [build-system]
-requires = [
-  "scikit-build-core>=0.11,<0.12",
-  "ninja>=1.11; platform_system == 'Windows'",
-]
-build-backend = "scikit_build_core.build"
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "ncgear"
-version = "0.1.0"
-description = "Generate noncircular gears from Python"
+version = "0.2.0"
+description = "Generate noncircular gears with a Python and Shapely geometry engine"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "GPL-3.0-or-later"
 authors = [{ name = "ncgear contributors" }]
-keywords = ["gear", "noncircular-gear", "cad", "mechanism", "cgal"]
+keywords = ["gear", "noncircular-gear", "cad", "mechanism", "shapely"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
@@ -21,19 +18,28 @@ classifiers = [
   "Intended Audience :: Science/Research",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Scientific/Engineering",
 ]
-dependencies = ["numpy>=1.26", "scipy>=1.11", "sympy>=1.12"]
+dependencies = [
+  "numpy>=1.26",
+  "scipy>=1.12",
+  "shapely>=2.1",
+  "sympy>=1.12",
+]
 
 [project.optional-dependencies]
 plot = ["matplotlib>=3.8"]
 test = ["pytest>=8"]
-build = ["build>=1.2", "cibuildwheel>=3.4; python_version >= '3.11'"]
+build = ["build>=1.2"]
 dev = [
   "build>=1.2",
-  "cibuildwheel>=3.4; python_version >= '3.11'",
   "matplotlib>=3.8",
   "pytest>=8",
+  "ruff>=0.9",
 ]
 
 [project.scripts]
@@ -44,44 +50,13 @@ Homepage = "https://github.com/kylebme/geargen5-5"
 Issues = "https://github.com/kylebme/geargen5-5/issues"
 Source = "https://github.com/kylebme/geargen5-5"
 
-[tool.scikit-build]
-cmake.build-type = "Release"
-build.targets = ["ncgear_generate"]
-install.components = ["python"]
-wheel.packages = ["ncgear"]
-wheel.py-api = "py3"
-sdist.include = [
-  "CMakeLists.txt",
-  "LICENSE",
-  "include/ncgear/gear.hpp",
-  "src/gear.cpp",
-  "src/main.cpp",
-]
+[tool.setuptools.packages.find]
+include = ["ncgear*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
 
-[tool.cibuildwheel]
-build = ["cp310-*"]
-skip = ["*-musllinux_*", "*-win32"]
-test-command = "python -c \"import subprocess, ncgear; subprocess.run([ncgear.native_generator(), '--help'], check=True)\""
-build-verbosity = 1
-
-[tool.cibuildwheel.linux]
-manylinux-x86_64-image = "manylinux_2_28"
-before-all = "dnf install -y epel-release && dnf install -y CGAL-devel boost1.78-devel gmp-devel mpfr-devel"
-
-[tool.cibuildwheel.linux.environment]
-CMAKE_ARGS = "-DBoost_DIR=/usr/lib64/cmake/Boost-1.78.0"
-
-[tool.cibuildwheel.macos]
-before-all = "brew install cgal"
-
-[tool.cibuildwheel.windows]
-before-all = "vcpkg install cgal:x64-windows"
-repair-wheel-command = "delvewheel repair --add-path C:/vcpkg/installed/x64-windows/bin -w {dest_dir} {wheel}"
-
-[tool.cibuildwheel.windows.environment]
-CMAKE_ARGS = "-DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows"
-CMAKE_GENERATOR = "Ninja"
+[tool.ruff]
+target-version = "py310"
+line-length = 88

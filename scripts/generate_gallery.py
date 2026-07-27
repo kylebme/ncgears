@@ -126,7 +126,6 @@ def main() -> int:
             samples=4096,
             samples_per_radian=90,
             output_directory=args.out,
-            generator=root / "build" / "ncgear_generate",
             render=False,
         )
 

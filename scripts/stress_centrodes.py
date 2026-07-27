@@ -224,11 +224,6 @@ def main() -> int:
         description="Stress-test centrode input with known and adversarial curves."
     )
     parser.add_argument("--out", type=Path, default=ROOT / "out")
-    parser.add_argument(
-        "--generator",
-        type=Path,
-        default=ROOT / "build" / "ncgear_generate",
-    )
     parser.add_argument("--samples", type=int, default=4096)
     parser.add_argument("--samples-per-radian", type=int, default=90)
     parser.add_argument("--no-render", action="store_true")
@@ -264,7 +259,6 @@ def main() -> int:
                 profile=case.profile,
                 samples_per_radian=args.samples_per_radian,
                 output_directory=args.out,
-                generator=args.generator,
                 render=not args.no_render,
             )
             metadata = json.loads(

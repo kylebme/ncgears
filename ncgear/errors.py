@@ -6,7 +6,7 @@ class NcgearError(Exception):
 
 
 class GeneratorNotFoundError(NcgearError):
-    """Raised when the native geometry generator cannot be located."""
+    """Legacy error retained for callers of :func:`native_generator`."""
 
 
 class GenerationError(NcgearError):

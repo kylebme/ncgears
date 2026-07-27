@@ -1,4 +1,4 @@
-"""Python-first conjugate noncircular gear generation."""
+"""Python-only conjugate noncircular gear generation."""
 
 from .api import generate, generate_from_centrode, generate_from_transmission
 from .errors import GenerationError, GeneratorNotFoundError, NcgearError
@@ -15,4 +15,4 @@ __all__ = [
     "generate_from_transmission",
     "native_generator",
 ]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

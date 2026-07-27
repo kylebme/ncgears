@@ -55,9 +55,17 @@ samples and aligns a closed sample grid with the reduced tooth ratio.
 
 The continuum cutter motion is approximated by dense cutter poses with a small
 conservative inward cutter margin. Regularized Boolean subtraction and
-component selection use CGAL's exact-construction kernel. Metadata records the
-pose count and maximum angular step so downstream tooling can audit the
-resolution.
+component selection use Shapely/GEOS double-precision floating-point geometry.
+The cycloidal mate sweep also expands its master cutter by 0.00175 module to
+keep its sampled envelope conservative between poses. Metadata records the
+backend, precision, pose count, and maximum angular step so downstream tooling
+can audit the resolution.
+
+GEOS uses robust predicates but does not retain an exact rational construction
+for every new vertex. In this algorithm, comparisons against the former CGAL
+implementation show Boolean differences far below cutter-pose discretization
+at normal gear scales. Very large coordinate offsets, modules close to machine
+precision, or extremely thin remnants remain unsuitable inputs.
 
 The finished polygons are checked at at least four phases per tooth over the
 whole requested cycle. Several off-grid phases additionally recover the first

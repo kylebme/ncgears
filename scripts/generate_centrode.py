@@ -52,11 +52,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cycloidal-rolling-factor", type=float, default=0.35)
     parser.add_argument("--samples-per-radian", type=int, default=110)
     parser.add_argument("--out", type=Path, default=ROOT / "out")
-    parser.add_argument(
-        "--generator",
-        type=Path,
-        default=ROOT / "build" / "ncgear_generate",
-    )
     parser.add_argument("--no-render", action="store_true")
     return parser
 
@@ -85,7 +80,6 @@ def main(argv: list[str] | None = None) -> int:
         cycloidal_rolling_factor=args.cycloidal_rolling_factor,
         samples_per_radian=args.samples_per_radian,
         output_directory=args.out,
-        generator=args.generator,
         render=not args.no_render,
     )
     return 0
