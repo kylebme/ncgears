@@ -5,8 +5,11 @@ import math
 from pathlib import Path
 from unittest.mock import patch
 
+import ezdxf
 import numpy as np
 import pytest
+from ezdxf import units
+from ezdxf.addons.drawing import Frontend, RenderContext, recorder
 
 import ncgears
 from ncgears.result import GearPair
@@ -61,6 +64,58 @@ def test_result_loads_and_exports_cad_formats(tmp_path: Path) -> None:
     assert '<polygon id="driven"' in svg.read_text(encoding="utf-8")
     assert "LWPOLYLINE" in dxf.read_text(encoding="ascii")
     assert "$INSUNITS" in dxf.read_text(encoding="ascii")
+
+
+def test_dxf_export_is_valid_and_renders_expected_geometry(tmp_path: Path) -> None:
+    pair = _fixture_pair(tmp_path / "fixture")
+    output = pair.export_dxf(tmp_path / "pair.dxf")
+
+    document = ezdxf.readfile(output)
+    auditor = document.audit()
+
+    assert not auditor.has_errors
+    assert document.units == units.MM
+    assert document.header["$MEASUREMENT"] == 1
+
+    polylines = list(document.modelspace().query("LWPOLYLINE"))
+    assert [polyline.dxf.layer for polyline in polylines] == ["DRIVE", "DRIVEN"]
+    expected_outlines = (pair.drive_outline, pair.placed_driven_outline)
+    for polyline, expected in zip(polylines, expected_outlines, strict=True):
+        assert polyline.closed
+        assert np.asarray(polyline.get_points("xy")) == pytest.approx(expected[:-1])
+
+    points = list(document.modelspace().query("POINT"))
+    assert [point.dxf.layer for point in points] == ["DRIVE", "DRIVEN"]
+    assert [tuple(point.dxf.location) for point in points] == pytest.approx(
+        [(0.0, 0.0, 0.0), (pair.center_distance, 0.0, 0.0)]
+    )
+    assert document.header["$PDMODE"] == 3
+
+    backend = recorder.Recorder()
+    Frontend(RenderContext(document), backend).draw_layout(document.modelspace())
+    bounds = backend.player().bbox()
+    expected_points = np.vstack(expected_outlines)
+    expected_minimum = np.min(expected_points, axis=0)
+    expected_maximum = np.max(expected_points, axis=0)
+    assert bounds.extmin.x <= expected_minimum[0]
+    assert bounds.extmin.y <= expected_minimum[1]
+    assert bounds.extmax.x >= expected_maximum[0]
+    assert bounds.extmax.y >= expected_maximum[1]
+
+
+@pytest.mark.parametrize("gear", ["drive", "driven"])
+def test_single_gear_dxf_centers_selected_gear_at_origin(
+    gear: str, tmp_path: Path
+) -> None:
+    pair = _fixture_pair(tmp_path / "fixture")
+    output = pair.export_dxf(tmp_path / f"{gear}.dxf", gear=gear)
+
+    document = ezdxf.readfile(output)
+    points = list(document.modelspace().query("POINT"))
+
+    assert len(points) == 1
+    assert points[0].dxf.layer == gear.upper()
+    assert tuple(points[0].dxf.location) == pytest.approx((0.0, 0.0, 0.0))
 
 
 def test_result_renders_animated_gif(tmp_path: Path) -> None:

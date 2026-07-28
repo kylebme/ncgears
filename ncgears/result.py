@@ -9,7 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+import ezdxf
 import numpy as np
+from ezdxf import colors, units
 from numpy.typing import NDArray
 
 GearSelection = Literal["drive", "driven", "pair"]
@@ -180,51 +182,46 @@ class GearPair:
         *,
         gear: GearSelection = "pair",
     ) -> Path:
-        """Export one outline or the assembled pair as an ASCII DXF."""
+        """Export one outline or the assembled pair as an ASCII DXF.
+
+        The document uses millimetres and one closed lightweight polyline per
+        gear. Pair exports place each outline on its own named layer.
+        """
 
         outlines = self._selected_outlines(gear)
         path = Path(output).expanduser()
         path.parent.mkdir(parents=True, exist_ok=True)
-        records = [
-            "0",
-            "SECTION",
-            "2",
-            "HEADER",
-            "9",
-            "$INSUNITS",
-            "70",
-            "4",  # millimetres
-            "0",
-            "ENDSEC",
-            "0",
-            "SECTION",
-            "2",
-            "ENTITIES",
-        ]
+
+        document = ezdxf.new("R2010")
+        document.units = units.MM
+        document.header["$MEASUREMENT"] = 1
+        document.header["$PDMODE"] = 3  # display POINT entities as crosses
+        modelspace = document.modelspace()
+        layer_colors = {
+            "drive": colors.BLUE,
+            "driven": colors.RED,
+        }
+
         for label, points in outlines.items():
             vertices = points
             if len(vertices) > 1 and np.allclose(vertices[0], vertices[-1]):
                 vertices = vertices[:-1]
-            records.extend(
-                [
-                    "0",
-                    "LWPOLYLINE",
-                    "100",
-                    "AcDbEntity",
-                    "8",
-                    label.upper(),
-                    "100",
-                    "AcDbPolyline",
-                    "90",
-                    str(len(vertices)),
-                    "70",
-                    "1",
-                ]
+            layer = label.upper()
+            document.layers.add(layer, color=layer_colors[label])
+            modelspace.add_lwpolyline(
+                vertices,
+                format="xy",
+                close=True,
+                dxfattribs={"layer": layer},
             )
-            for x, y in vertices:
-                records.extend(["10", f"{x:.17g}", "20", f"{y:.17g}"])
-        records.extend(["0", "ENDSEC", "0", "EOF"])
-        path.write_text("\n".join(records) + "\n", encoding="ascii")
+            center = (
+                (self.center_distance, 0.0)
+                if gear == "pair" and label == "driven"
+                else (0.0, 0.0)
+            )
+            modelspace.add_point(center, dxfattribs={"layer": layer})
+
+        document.saveas(path)
         return path.resolve()
 
     def _selected_outlines(self, gear: GearSelection) -> dict[str, NDArray[np.float64]]:
