@@ -1,9 +1,10 @@
 # Physical and numerical boundaries
 
-The generator accepts inflections and mild nonconvexity when every rack pose
-remains local to the requested tooth envelope. It subtracts the global swept
-rack-cutter solid from a gear blank and selects the largest hub-connected
-result.
+Closed nonconvex inputs with `profile="involute"` use the analytic-form
+backend. It evaluates generalized-involute flank equations directly and uses
+Shapely/GEOS to regularize and union the tooth bodies with a non-working radial
+root blank. Convex involute, open, and legacy cycloidal-eased inputs retain the
+sampled cutter-sweep backends.
 
 A complete straight rack cannot enter an arbitrarily deep concavity: a tangent
 inside the concavity can cross and cut distant parts of the intended gear. In
@@ -11,10 +12,10 @@ the current implementation this is global rack-solid self-occlusion, not a
 Boolean-geometry precision problem. It does not imply that the intended form
 cannot be molded, sintered, or printed. A connected leftover body can still
 form a conjugate cam-like pair while no longer tracing the requested centrode.
-Closed outputs are therefore rejected when the Hausdorff distance between the
-drive outline and its centrode exceeds the larger tooth height plus fillet and
-numerical allowances recorded by `drive_centrode_outline_distance` and
-`centrode_fidelity_tolerance`.
+Sweep-generated closed outputs are therefore rejected when the Hausdorff
+distance between the drive outline and its centrode exceeds the larger tooth
+height plus fillet and numerical allowances recorded by
+`drive_centrode_outline_distance` and `centrode_fidelity_tolerance`.
 
 Supporting deeper concavities requires a different geometry backend that
 constructs certified local working flanks against an explicit nonconvex blank,
@@ -68,6 +69,26 @@ inconsistent linear interpolation used by the original implementation.
 Input samples are assumed to be uniformly spaced. The frontend writes uniform
 samples and aligns a closed sample grid with the reduced tooth ratio.
 
+## Analytic-form approximation
+
+The generalized-involute working flanks use the exact analytic
+straight-rack-envelope equation. GEOS intersects sampled flank curves with the
+parallel addendum boundary, while SciPy refines each intersection against the
+two analytic parameterizations. Flanks stop at their first root-side cusp;
+root connectors and the radial root blank are non-working closure geometry.
+
+The output remains a tessellated polygon. Metadata reports
+`maximum_envelope_residual`, `maximum_envelope_tangency_residual`, and
+`maximum_analytic_chord_error`. Whole-cycle solid checks and off-grid contact
+recovery reject a result if a non-working connector enters the intended
+contact set.
+
+The analytic backend currently records but does not apply the requested
+`fillet_factor` to its non-working linear root connectors. Metadata reports
+`requested_fillet_applied_to_closure: false`. A molding or printing workflow
+may round those connectors downstream, but any transverse-profile edit must be
+run through pair verification again.
+
 ## Swept-solid approximation
 
 The continuum cutter motion is approximated by dense cutter poses with a small
@@ -99,17 +120,19 @@ Increase `--samples-per-radian` when:
 
 ## Profile families
 
-`involute` uses a straight-flanked rack with a rounded cutter tip and generates
-both gears with complementary rack phase. `cycloidal` first generates the
-master with a smooth cycloidal-eased rack flank controlled by
+For a closed nonconvex centrode, `involute` uses analytic complementary
+straight-rack envelope branches and reports `profile_family` as
+`generalized_involute`. Other involute cases retain the straight-flanked rack
+sweep with a rounded cutter tip. `cycloidal` first generates the master with a
+smooth cycloidal-eased rack flank controlled by
 `--cycloidal-rolling-factor`, then generates the mate by sweeping the complete
 finished master solid through the prescribed relative motion. The second
 construction is slower but directly enforces conjugacy for a rack profile that
 is not self-conjugate.
 
-The cycloidal backend is a rack-generated cycloidal family, not a pin-wheel,
-gerotor, or eccentric cycloidal reducer. Those require different relative
-motion and cutter definitions.
+The current cycloidal backend is not a strict rolling-circle cycloid; it is
+retained for compatibility and will be renamed `eased_rack`. A strict
+rolling-circle backend remains future work.
 
 ## Open segments
 

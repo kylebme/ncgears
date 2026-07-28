@@ -79,10 +79,10 @@ CASES = [
         teeth=100,
         category="unequal_ratio_multilobe",
         target_cycle_delta=5.0 * math.pi,
-        profile="cycloidal",
+        profile="involute",
         note=(
-            "Mild nonconvex five-lobe centrode with a repeat-compatible "
-            "100:40 tooth closure."
+            "Nonconvex five-lobe centrode exercising the analytic involute "
+            "backend with a repeat-compatible 100:40 tooth closure."
         ),
     ),
     StressCase(
@@ -96,8 +96,7 @@ CASES = [
         teeth=64,
         category="adversarial_harmonic",
         reference_center_distance=1.0,
-        note="Expected rack self-occlusion from asymmetric mixed harmonics.",
-        expected_to_pass=False,
+        note="Asymmetric mixed harmonics exercising analytic branch arrangement.",
     ),
     StressCase(
         name="stress_direct_rosette",
@@ -118,8 +117,7 @@ CASES = [
         expression=("1 + 0.22*sin(phi) + 0.15*cos(2*phi) - 0.025*sin(3*phi)"),
         teeth=64,
         category="silhouette_inspired",
-        note="Expected rack self-occlusion at the pronounced upper cleft.",
-        expected_to_pass=False,
+        note="Pronounced cleft exercising direct analytic flank construction.",
     ),
     StressCase(
         name="crazy_teardrop",
@@ -147,8 +145,7 @@ CASES = [
         expression=("1 + 0.25*cos(phi) - 0.07*cos(2*phi) + 0.03*cos(3*phi)"),
         teeth=64,
         category="silhouette_inspired",
-        note="Expected rack self-occlusion in the eccentric concavity.",
-        expected_to_pass=False,
+        note="Eccentric concavity exercising direct analytic flank construction.",
     ),
     StressCase(
         name="crazy_organic",
@@ -185,14 +182,13 @@ CASES = [
         name="stress_limit_five_lobe_5_to_2",
         expression="1 + 0.08*cos(5*phi)",
         teeth=100,
-        category="expected_rack_self_occlusion",
+        category="analytic_nonconvex_regression",
         target_cycle_delta=5.0 * math.pi,
-        profile="cycloidal",
+        profile="involute",
         note=(
-            "Five-lobe 100:40 closure whose connected leftover body no "
-            "longer follows the requested centrode."
+            "Former rack-self-occlusion regression; the analytic involute "
+            "backend must retain the five concavities."
         ),
-        expected_to_pass=False,
     ),
     StressCase(
         name="stress_limit_mixed_harmonics",
@@ -282,6 +278,13 @@ def main() -> int:
                         "centrode_fidelity_tolerance"
                     ],
                     "cutter_sweep_phase_count": metadata["cutter_sweep_phase_count"],
+                    "generation_backend": metadata["generation_backend"],
+                    "maximum_envelope_residual": metadata[
+                        "maximum_envelope_residual"
+                    ],
+                    "maximum_envelope_tangency_residual": metadata[
+                        "maximum_envelope_tangency_residual"
+                    ],
                 }
             )
             label = "PASS" if quality_passed else "QUALITY_LIMIT"

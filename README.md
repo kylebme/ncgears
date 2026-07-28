@@ -5,9 +5,9 @@ pitch-curve shape.
 
 The generator creates 2D outlines, verifies the assembled pair for interference
 and contact-motion error, and exports CSV, SVG, DXF, JSON, PNG, and animated GIF
-files. It supports closed gears, finite open segments, mild nonconvex pitch
-curves that remain accessible to a straight rack, unequal ratios, and
-involute-rack or cycloidal-rack tooth families.
+files. It supports closed gears, finite open segments, deep nonconvex pitch
+curves, unequal ratios, generalized-involute teeth, and the legacy
+cycloidal-eased rack family.
 The complete application and geometry pipeline are implemented in Python;
 Shapely/GEOS provides robust floating-point polygon operations.
 
@@ -107,13 +107,18 @@ one mate revolution. A specific ratio can be selected with
 import math
 
 pair = ncgears.generate_from_centrode(
-    "1 + 0.04*cos(5*phi)",
+    "1 + 0.08*cos(5*phi)",
     teeth=100,
     target_cycle_delta=5 * math.pi,
-    profile="cycloidal",
+    profile="involute",
     name="five_to_two",
 )
 ```
+
+Closed nonconvex involute inputs automatically use the direct analytic-form
+backend. It evaluates the straight-rack envelope equations without constructing
+or sweeping a complete rack solid, so remote rack material cannot erase a
+pitch-curve concavity.
 
 ## Closed and open designs
 
@@ -139,23 +144,24 @@ pair = ncgears.generate(
 
 ## What is verified
 
-The Python engine uses swept rack-cutter solids and Shapely/GEOS regularized
-polygon operations. A successful result includes checks for:
+The Python engine uses analytic generalized-involute branches for closed
+nonconvex involute gears. Shapely/GEOS nodes and unions their tooth bodies with
+the non-working root blank. Convex, open, and legacy cycloidal-eased cases
+continue to use sampled cutter sweeps. A successful result includes checks for:
 
 - simple, hub-connected gear bodies
 - sampled whole-cycle solid interference
 - contact motion recovered from the finished outlines
-- sweep resolution, root radius, tip thickness, and centrode curvature
+- analytic envelope/tangency residuals or sweep resolution, as applicable
+- root radius, tip thickness, and centrode curvature
 - drive-outline fidelity to the requested centrode
 - sliding-velocity and undercut diagnostics
 
-`metadata.json` records `geometry_backend: "shapely-geos"`, double-precision
-construction, worker limit, cutter-pose count, and the maximum sweep step.
-Independent involute gear sweeps and verification phases use a bounded thread
-pool of at most eight workers; the dependent cycloidal master/mate sweeps
-remain sequential. Floating-point Boolean error is normally far below the
-error from discretizing cutter motion; increase `samples_per_radian` when a
-design operates close to its tolerances.
+`metadata.json` distinguishes `generation_backend: "analytic_form"` from
+`"sampled_cutter_sweep"`. Analytic results report flank sample count, maximum
+envelope residual, maximum envelope-tangency residual, and chord error.
+Sweep-based results report cutter-pose count and maximum sweep step. Pair
+verification uses a bounded thread pool of at most eight workers.
 
 These geometry checks are not load-rating or manufacturing certification.
 
@@ -177,8 +183,10 @@ runtime through its own platform wheels.
 The pitch-curve equations follow Uwe Bäsel,
 ["Determining the geometry of noncircular gears for given transmission
 function"](https://arxiv.org/abs/1905.02642). Tooth geometry is constructed by
-sweeping a parameterized rack cutter rather than assembling only locally convex
-branches. The silhouette-fitting problem addressed by Xu et al.,
+evaluating its analytic straight-rack envelope for nonconvex centrodes and by
+sweeping a parameterized rack cutter for the legacy backends. GEOS performs
+curve arrangement and solid regularization rather than project-specific
+intersection code. The silhouette-fitting problem addressed by Xu et al.,
 ["Computational Design and Optimization of Non-Circular
 Gears"](https://doi.org/10.1111/cgf.13939), is complementary: a fitted
 transmission derivative or polar centrode can be passed into ncgears.

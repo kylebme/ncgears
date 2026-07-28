@@ -22,6 +22,29 @@ engines:
 Do not call an arbitrary finite rack, a locally fitted circular tooth, or a
 conjugate sweep alone "involute" or "cycloidal."
 
+## Current implementation
+
+Closed nonconvex inputs with `profile="involute"` now automatically use
+`generation_backend="analytic_form"`. The pure-Python implementation:
+
+- evaluates the analytic straight-rack envelope branches in common pitch-arc
+  coordinates, which remain monotone through centrode inflections;
+- uses Shapely/GEOS for sampled curve intersections, validity repair, and
+  tooth-body union;
+- refines flank/addendum intersections with SciPy nonlinear least squares;
+- stops each working flank at its first root-side cusp using SciPy's bracketed
+  root solver;
+- constructs root connectors and a radial inset as explicitly non-working
+  closure geometry;
+- verifies the finished pair for whole-cycle interference and off-grid contact
+  recovery;
+- records analytic equation, envelope-tangency, intersection, and chord-error
+  residuals.
+
+The legacy rack sweep remains in use for convex and open involute inputs.
+Strict rolling-circle cycloidal construction and per-segment provenance remain
+future work.
+
 ## Profile definitions
 
 The API needs an explicit definition because "involute noncircular gear" is not

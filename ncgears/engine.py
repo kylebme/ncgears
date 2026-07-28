@@ -19,8 +19,10 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import NDArray
 from scipy.integrate import cumulative_simpson, simpson
+from scipy.optimize import brentq, least_squares
 from shapely import Geometry, make_valid, union_all
 from shapely.geometry import LineString, MultiPolygon, Point, Polygon
+from shapely.ops import nearest_points
 
 FloatArray = NDArray[np.float64]
 _MAX_GEOMETRY_WORKERS = max(1, min(8, os.cpu_count() or 1))
@@ -592,19 +594,56 @@ class _GearGenerator:
     def _driven_radius(self, phi: float | FloatArray) -> float | FloatArray:
         return self.center_distance / (1.0 + self._psi(phi, 1))
 
-    def _rack_pose(self, phi: float, driven: bool) -> tuple[complex, complex]:
-        first = float(self._psi(phi, 1))
-        second = float(self._psi(phi, 2))
-        tangent_base = complex(second, -first * (1.0 + first)) / math.hypot(
-            second, first * (1.0 + first)
+    def _drive_centrode(
+        self, phi: float | FloatArray
+    ) -> complex | NDArray[np.complex128]:
+        values = np.asarray(phi, dtype=float)
+        result = np.asarray(self._drive_radius(values), dtype=float) * np.exp(
+            -1j * values
         )
+        return complex(result) if result.ndim == 0 else result
+
+    def _driven_centrode(
+        self, phi: float | FloatArray
+    ) -> complex | NDArray[np.complex128]:
+        values = np.asarray(phi, dtype=float)
+        result = -np.asarray(self._driven_radius(values), dtype=float) * np.exp(
+            1j * np.asarray(self._psi(values), dtype=float)
+        )
+        return complex(result) if result.ndim == 0 else result
+
+    def _drive_tangent(
+        self, phi: float | FloatArray
+    ) -> complex | NDArray[np.complex128]:
+        values = np.asarray(phi, dtype=float)
+        first = np.asarray(self._psi(values, 1), dtype=float)
+        second = np.asarray(self._psi(values, 2), dtype=float)
+        base = (second - 1j * first * (1.0 + first)) / np.asarray(
+            self._w(values), dtype=float
+        )
+        result = base * np.exp(-1j * values)
+        return complex(result) if result.ndim == 0 else result
+
+    def _driven_tangent(
+        self, phi: float | FloatArray
+    ) -> complex | NDArray[np.complex128]:
+        values = np.asarray(phi, dtype=float)
+        first = np.asarray(self._psi(values, 1), dtype=float)
+        second = np.asarray(self._psi(values, 2), dtype=float)
+        base = (second - 1j * first * (1.0 + first)) / np.asarray(
+            self._w(values), dtype=float
+        )
+        result = base * np.exp(1j * np.asarray(self._psi(values), dtype=float))
+        return complex(result) if result.ndim == 0 else result
+
+    def _rack_pose(self, phi: float, driven: bool) -> tuple[complex, complex]:
         if driven:
-            rotation = np.exp(1j * float(self._psi(phi)))
-            pitch_point = -self.center_distance / (1.0 + first) * rotation
+            pitch_point = complex(self._driven_centrode(phi))
+            tangent = complex(self._driven_tangent(phi))
         else:
-            rotation = np.exp(-1j * phi)
-            pitch_point = self.center_distance * first / (1.0 + first) * rotation
-        return pitch_point, tangent_base * rotation
+            pitch_point = complex(self._drive_centrode(phi))
+            tangent = complex(self._drive_tangent(phi))
+        return pitch_point, tangent
 
     def _drive_curvature(self, phi: FloatArray) -> FloatArray:
         first = np.asarray(self._psi(phi, 1))
@@ -904,6 +943,515 @@ class _GearGenerator:
             phase_count,
         )
 
+    def _phi_from_common_arc(self, common_arc: FloatArray) -> FloatArray:
+        """Invert pitch-curve arc using the dense monotone integration table."""
+
+        values = np.asarray(common_arc, dtype=float)
+        cycle_arc = self.center_distance * self.arc_integral.domain_integral
+        if not self.closed:
+            table_arc = self.center_distance * (
+                self.arc_integral.prefix
+                - float(self.arc_integral._antiderivative(self.active_start))
+            )
+            return np.interp(values, table_arc, self.arc_integral.x)
+
+        cycles = np.floor(values / cycle_arc)
+        remainder = values - cycles * cycle_arc
+        tolerance = 64.0 * np.finfo(float).eps * max(1.0, abs(cycle_arc))
+        at_cycle_end = np.abs(remainder - cycle_arc) <= tolerance
+        cycles = np.where(at_cycle_end, cycles + 1.0, cycles)
+        remainder = np.where(at_cycle_end, 0.0, remainder)
+        base_phi = np.interp(
+            remainder,
+            self.center_distance * self.arc_integral.prefix,
+            self.arc_integral.x,
+        )
+        return base_phi + cycles * self.config.period
+
+    def _analytic_involute_points(
+        self,
+        *,
+        driven: bool,
+        tooth_phase: int,
+        sign: int,
+        common_arc: FloatArray,
+    ) -> NDArray[np.complex128]:
+        pitch = math.pi * self.config.module
+        values = np.asarray(common_arc, dtype=float)
+        phi = self._phi_from_common_arc(values)
+        centrode = (
+            np.asarray(self._driven_centrode(phi), dtype=np.complex128)
+            if driven
+            else np.asarray(self._drive_centrode(phi), dtype=np.complex128)
+        )
+        tangent = (
+            np.asarray(self._driven_tangent(phi), dtype=np.complex128)
+            if driven
+            else np.asarray(self._drive_tangent(phi), dtype=np.complex128)
+        )
+        rack_coordinate = (
+            sign * 0.25 * pitch - (values - tooth_phase * pitch)
+        )
+        direction = complex(math.cos(self.alpha), sign * math.sin(self.alpha))
+        return (
+            centrode
+            + rack_coordinate * tangent * direction * math.cos(self.alpha)
+        )
+
+    def _analytic_offset_points(
+        self,
+        *,
+        driven: bool,
+        common_arc: FloatArray,
+        height: float,
+    ) -> NDArray[np.complex128]:
+        values = np.asarray(common_arc, dtype=float)
+        phi = self._phi_from_common_arc(values)
+        centrode = (
+            np.asarray(self._driven_centrode(phi), dtype=np.complex128)
+            if driven
+            else np.asarray(self._drive_centrode(phi), dtype=np.complex128)
+        )
+        tangent = (
+            np.asarray(self._driven_tangent(phi), dtype=np.complex128)
+            if driven
+            else np.asarray(self._drive_tangent(phi), dtype=np.complex128)
+        )
+        outward_normal = (-1j if driven else 1j) * tangent
+        return centrode + height * outward_normal
+
+    @staticmethod
+    def _line_parameter(
+        line: LineString, point: Point, parameters: FloatArray
+    ) -> float:
+        coordinates = np.asarray(line.coords, dtype=float)
+        lengths = np.linalg.norm(np.diff(coordinates, axis=0), axis=1)
+        cumulative = np.concatenate(([0.0], np.cumsum(lengths)))
+        return float(
+            np.interp(
+                line.project(point),
+                cumulative,
+                np.asarray(parameters, dtype=float),
+            )
+        )
+
+    @staticmethod
+    def _intersection_points(geometry: Geometry) -> list[Point]:
+        if geometry.is_empty:
+            return []
+        if isinstance(geometry, Point):
+            return [geometry]
+        points: list[Point] = []
+        for child in getattr(geometry, "geoms", ()):
+            points.extend(_GearGenerator._intersection_points(child))
+        return points
+
+    def _analytic_flank_offset_intersection(
+        self,
+        *,
+        driven: bool,
+        tooth_phase: int,
+        sign: int,
+        height: float,
+    ) -> tuple[float, float, float]:
+        """Intersect an analytic flank with a parallel centrode offset.
+
+        GEOS supplies robust candidate intersections of densely sampled
+        LineStrings. SciPy then refines each two-parameter candidate against
+        the analytic curves.
+        """
+
+        pitch = math.pi * self.config.module
+        sine_cosine = math.sin(self.alpha) * math.cos(self.alpha)
+        outward_orientation = -1 if driven else 1
+        target_lambda = height / (outward_orientation * sign * sine_cosine)
+        expected_flank_arc = (
+            tooth_phase * pitch + sign * 0.25 * pitch - target_lambda
+        )
+        flank_arc = np.linspace(
+            expected_flank_arc - 1.25 * pitch,
+            expected_flank_arc + 1.25 * pitch,
+            257,
+        )
+        offset_arc = np.linspace(
+            tooth_phase * pitch - 1.75 * pitch,
+            tooth_phase * pitch + 1.75 * pitch,
+            385,
+        )
+        flank_points = self._analytic_involute_points(
+            driven=driven,
+            tooth_phase=tooth_phase,
+            sign=sign,
+            common_arc=flank_arc,
+        )
+        offset_points = self._analytic_offset_points(
+            driven=driven,
+            common_arc=offset_arc,
+            height=height,
+        )
+        flank_line = LineString(
+            np.column_stack((flank_points.real, flank_points.imag))
+        )
+        offset_line = LineString(
+            np.column_stack((offset_points.real, offset_points.imag))
+        )
+        candidate_points = self._intersection_points(
+            flank_line.intersection(offset_line)
+        )
+        if not candidate_points:
+            candidate_points = [nearest_points(flank_line, offset_line)[0]]
+
+        lower = np.asarray([flank_arc[0], offset_arc[0]], dtype=float)
+        upper = np.asarray([flank_arc[-1], offset_arc[-1]], dtype=float)
+        candidates: list[tuple[float, float, float]] = []
+        for point in candidate_points:
+            initial = np.asarray(
+                [
+                    self._line_parameter(flank_line, point, flank_arc),
+                    self._line_parameter(offset_line, point, offset_arc),
+                ]
+            )
+
+            def residual(parameters: FloatArray) -> FloatArray:
+                flank = self._analytic_involute_points(
+                    driven=driven,
+                    tooth_phase=tooth_phase,
+                    sign=sign,
+                    common_arc=np.asarray([parameters[0]]),
+                )[0]
+                offset = self._analytic_offset_points(
+                    driven=driven,
+                    common_arc=np.asarray([parameters[1]]),
+                    height=height,
+                )[0]
+                difference = (flank - offset) / self.config.module
+                return np.asarray([difference.real, difference.imag])
+
+            solution = least_squares(
+                residual,
+                initial,
+                bounds=(lower, upper),
+                xtol=1e-13,
+                ftol=1e-13,
+                gtol=1e-13,
+                max_nfev=100,
+            )
+            geometric_residual = float(np.linalg.norm(residual(solution.x)))
+            if solution.success and geometric_residual <= 2e-7:
+                candidates.append(
+                    (
+                        float(solution.x[0]),
+                        float(solution.x[1]),
+                        geometric_residual * self.config.module,
+                    )
+                )
+        if not candidates:
+            member = "driven" if driven else "drive"
+            boundary = "addendum" if height > 0.0 else "root"
+            raise RuntimeError(
+                f"Could not intersect {member} analytic flank with its "
+                f"{boundary} boundary for tooth {tooth_phase}, sign {sign}"
+            )
+        return min(
+            candidates,
+            key=lambda candidate: (
+                abs(candidate[0] - expected_flank_arc)
+                + 0.25 * abs(candidate[1] - tooth_phase * pitch)
+            ),
+        )
+
+    def _analytic_flank_root_arc(
+        self,
+        *,
+        driven: bool,
+        tooth_phase: int,
+        sign: int,
+        tip_arc: float,
+    ) -> float:
+        """Stop a working flank at its first cusp toward the tooth root."""
+
+        pitch = math.pi * self.config.module
+        sine_cosine = math.sin(self.alpha) * math.cos(self.alpha)
+        outward_orientation = -1 if driven else 1
+        root_lambda = -self.dedendum / (
+            outward_orientation * sign * sine_cosine
+        )
+        expected_root_arc = (
+            tooth_phase * pitch + sign * 0.25 * pitch - root_lambda
+        )
+
+        def singular(common_arc: float) -> float:
+            phi = self._phi_from_common_arc(np.asarray([common_arc]))[0]
+            curvature = float(
+                self._driven_curvature(np.asarray([phi]))[0]
+                if driven
+                else self._drive_curvature(np.asarray([phi]))[0]
+            )
+            rack_coordinate = (
+                sign * 0.25 * pitch
+                - (common_arc - tooth_phase * pitch)
+            )
+            return rack_coordinate * curvature - sign * math.tan(self.alpha)
+
+        low = min(tip_arc, expected_root_arc)
+        high = max(tip_arc, expected_root_arc)
+        samples = np.linspace(low, high, 257)
+        values = np.asarray([singular(float(value)) for value in samples])
+        roots: list[float] = []
+        for index in range(len(samples) - 1):
+            if values[index] == 0.0:
+                roots.append(float(samples[index]))
+            elif values[index] * values[index + 1] < 0.0:
+                roots.append(
+                    float(
+                        brentq(
+                            singular,
+                            float(samples[index]),
+                            float(samples[index + 1]),
+                            xtol=1e-13,
+                            rtol=1e-13,
+                        )
+                    )
+                )
+        if values[-1] == 0.0:
+            roots.append(float(samples[-1]))
+        if not roots:
+            return expected_root_arc
+        return min(roots, key=lambda root: abs(root - tip_arc))
+
+    def _analytic_involute_flank(
+        self,
+        *,
+        driven: bool,
+        tooth_phase: int,
+        sign: int,
+        samples_per_radian: int,
+    ) -> tuple[NDArray[np.complex128], int, float, float, float]:
+        """Sample one exact straight-rack envelope branch.
+
+        The branch formula is Bäsel's generalized noncircular involute.  The
+        independent variable here is common pitch arc, which is monotone even
+        through centrode inflections.
+        """
+
+        tip_arc, _, tip_residual = self._analytic_flank_offset_intersection(
+            driven=driven,
+            tooth_phase=tooth_phase,
+            sign=sign,
+            height=self.addendum,
+        )
+        root_arc = self._analytic_flank_root_arc(
+            driven=driven,
+            tooth_phase=tooth_phase,
+            sign=sign,
+            tip_arc=tip_arc,
+        )
+        endpoint_phi = self._phi_from_common_arc(
+            np.asarray([root_arc, tip_arc], dtype=float)
+        )
+        phi_span = abs(float(endpoint_phi[1] - endpoint_phi[0]))
+        sample_count = max(128, math.ceil(4.0 * phi_span * samples_per_radian))
+        common_arc = np.linspace(root_arc, tip_arc, sample_count + 1)
+        points = self._analytic_involute_points(
+            driven=driven,
+            tooth_phase=tooth_phase,
+            sign=sign,
+            common_arc=common_arc,
+        )
+
+        phi = self._phi_from_common_arc(common_arc)
+        centrode = (
+            np.asarray(self._driven_centrode(phi), dtype=np.complex128)
+            if driven
+            else np.asarray(self._drive_centrode(phi), dtype=np.complex128)
+        )
+        tangent = (
+            np.asarray(self._driven_tangent(phi), dtype=np.complex128)
+            if driven
+            else np.asarray(self._drive_tangent(phi), dtype=np.complex128)
+        )
+        pitch = math.pi * self.config.module
+        phase_arc = tooth_phase * pitch
+        rack_coordinate = sign * 0.25 * pitch - (common_arc - phase_arc)
+        direction = complex(math.cos(self.alpha), sign * math.sin(self.alpha))
+        local = (points - centrode) / tangent
+        expected = rack_coordinate * direction * math.cos(self.alpha)
+        envelope_residual = max(
+            tip_residual,
+            float(np.max(np.abs(local - expected))),
+        )
+
+        midpoint_arc = 0.5 * (common_arc[:-1] + common_arc[1:])
+        exact_midpoint = self._analytic_involute_points(
+            driven=driven,
+            tooth_phase=tooth_phase,
+            sign=sign,
+            common_arc=midpoint_arc,
+        )
+        midpoint_phi = self._phi_from_common_arc(midpoint_arc)
+        midpoint_tangent = (
+            np.asarray(self._driven_tangent(midpoint_phi), dtype=np.complex128)
+            if driven
+            else np.asarray(self._drive_tangent(midpoint_phi), dtype=np.complex128)
+        )
+        midpoint_curvature = (
+            self._driven_curvature(midpoint_phi)
+            if driven
+            else self._drive_curvature(midpoint_phi)
+        )
+        midpoint_lambda = sign * 0.25 * pitch - (midpoint_arc - phase_arc)
+        derivative = midpoint_tangent * (
+            1.0
+            - math.cos(self.alpha) * direction
+            + 1j
+            * midpoint_curvature
+            * midpoint_lambda
+            * math.cos(self.alpha)
+            * direction
+        )
+        generator_tangent = 1j * midpoint_tangent * direction
+        # Tangent direction is undefined at the deliberately retained root
+        # cusp. The envelope identity is certified on regular flank intervals.
+        regular = np.abs(derivative) > 1e-10
+        if np.any(regular):
+            normalized_generator = generator_tangent[regular] / np.abs(
+                generator_tangent[regular]
+            )
+            normalized_derivative = derivative[regular] / np.abs(derivative[regular])
+            tangency_residual = float(
+                np.max(
+                    np.abs(
+                        np.imag(
+                            np.conj(normalized_generator) * normalized_derivative
+                        )
+                    )
+                )
+            )
+        else:
+            tangency_residual = 0.0
+        segment_start = points[:-1]
+        segment = points[1:] - segment_start
+        denominator = np.maximum(np.abs(segment) ** 2, np.finfo(float).tiny)
+        projection = np.clip(
+            np.real((exact_midpoint - segment_start) * np.conj(segment))
+            / denominator,
+            0.0,
+            1.0,
+        )
+        chord_error = float(
+            np.max(np.abs(exact_midpoint - (segment_start + projection * segment)))
+        )
+        return (
+            points,
+            sample_count,
+            envelope_residual,
+            tangency_residual,
+            chord_error,
+        )
+
+    def _analytic_root_blank(self, driven: bool) -> Polygon:
+        """Construct a robust non-working root body from a radial inset."""
+
+        teeth = self.driven_teeth if driven else self.drive_teeth
+        cycle = self.driven_cycle if driven else self.drive_cycle
+        sample_count = max(2048, 64 * teeth)
+        phi = np.linspace(
+            self.active_start,
+            self.active_start + cycle,
+            sample_count,
+            endpoint=False,
+        )
+        centrode = (
+            np.asarray(self._driven_centrode(phi), dtype=np.complex128)
+            if driven
+            else np.asarray(self._drive_centrode(phi), dtype=np.complex128)
+        )
+        radius = np.abs(centrode)
+        hub_radius = max(
+            0.08 * self.config.module,
+            min(0.30 * self.minimum_pitch_radius, 0.5 * float(np.min(radius))),
+        )
+        root_radius = np.maximum(hub_radius, radius - self.dedendum)
+        radial_root = centrode * root_radius / radius
+        root = Polygon(np.column_stack((radial_root.real, radial_root.imag)))
+        hub = Point(0.0, 0.0).buffer(hub_radius, quad_segs=128)
+        return _clean_polygon(union_all([make_valid(root), hub]))
+
+    def _generate_analytic_involute_gear(
+        self, driven: bool, samples_per_radian: int
+    ) -> tuple[FloatArray, int, float, float, float]:
+        """Assemble analytic involute branches with GEOS Boolean arrangement."""
+
+        teeth = self.driven_teeth if driven else self.drive_teeth
+        branches: dict[tuple[int, int], NDArray[np.complex128]] = {}
+        total_samples = 0
+        maximum_envelope_residual = 0.0
+        maximum_tangency_residual = 0.0
+        maximum_chord_error = 0.0
+        last_phase = teeth if driven else teeth - 1
+        for tooth_phase in range(last_phase + 1):
+            for sign in (-1, 1):
+                points, count, residual, tangency_residual, chord_error = (
+                    self._analytic_involute_flank(
+                        driven=driven,
+                        tooth_phase=tooth_phase,
+                        sign=sign,
+                        samples_per_radian=samples_per_radian,
+                    )
+                )
+                branches[tooth_phase, sign] = points
+                total_samples += count
+                maximum_envelope_residual = max(
+                    maximum_envelope_residual, residual
+                )
+                maximum_tangency_residual = max(
+                    maximum_tangency_residual, tangency_residual
+                )
+                maximum_chord_error = max(maximum_chord_error, chord_error)
+
+        tooth_bodies: list[Geometry] = [self._analytic_root_blank(driven)]
+        connector_radius = max(
+            0.08 * self.config.module, 0.25 * self.minimum_pitch_radius
+        )
+        for tooth in range(teeth):
+            if driven:
+                first = branches[tooth, 1]
+                second = branches[tooth + 1, -1][::-1]
+            else:
+                first = branches[tooth, -1]
+                second = branches[tooth, 1][::-1]
+            first_inner = (
+                first[0] * connector_radius / max(abs(first[0]), connector_radius)
+            )
+            second_inner = (
+                second[-1]
+                * connector_radius
+                / max(abs(second[-1]), connector_radius)
+            )
+            ring = np.concatenate(
+                (
+                    np.asarray([first_inner]),
+                    first,
+                    second,
+                    np.asarray([second_inner, first_inner]),
+                )
+            )
+            body = Polygon(np.column_stack((ring.real, ring.imag)))
+            tooth_bodies.append(make_valid(body))
+
+        arranged = union_all(tooth_bodies)
+        polygon = _clean_polygon(arranged)
+        outline = _outline(
+            polygon, 2e-7 * max(1.0, self.config.module)
+        )
+        return (
+            outline,
+            total_samples,
+            maximum_envelope_residual,
+            maximum_tangency_residual,
+            maximum_chord_error,
+        )
+
     def _overlap(
         self,
         drive: FloatArray,
@@ -1044,7 +1592,56 @@ class _GearGenerator:
     def generate(self, samples_per_radian: int) -> EngineResult:
         if samples_per_radian < 20:
             raise ValueError("samples_per_radian must be at least 20")
-        if self.config.profile == "cycloidal":
+        analytic_involute = (
+            self.config.profile == "involute"
+            and self.closed
+            and not self.centrodes_are_convex
+        )
+        maximum_envelope_residual: float | None = None
+        maximum_tangency_residual: float | None = None
+        maximum_chord_error: float | None = None
+        analytic_flank_sample_count = 0
+        if analytic_involute:
+            (
+                drive,
+                drive_samples,
+                drive_envelope_residual,
+                drive_tangency_residual,
+                drive_chord_error,
+            ) = self._generate_analytic_involute_gear(False, samples_per_radian)
+            (
+                driven,
+                driven_samples,
+                driven_envelope_residual,
+                driven_tangency_residual,
+                driven_chord_error,
+            ) = self._generate_analytic_involute_gear(True, samples_per_radian)
+            drive_phases = 0
+            driven_phases = 0
+            analytic_flank_sample_count = drive_samples + driven_samples
+            maximum_envelope_residual = max(
+                drive_envelope_residual, driven_envelope_residual
+            )
+            maximum_tangency_residual = max(
+                drive_tangency_residual, driven_tangency_residual
+            )
+            maximum_chord_error = max(drive_chord_error, driven_chord_error)
+            if maximum_envelope_residual > 1e-8 * self.config.module:
+                raise RuntimeError(
+                    "Analytic involute envelope residual exceeds tolerance "
+                    f"({maximum_envelope_residual:.9g})"
+                )
+            if maximum_tangency_residual > 1e-10:
+                raise RuntimeError(
+                    "Analytic involute tangency residual exceeds tolerance "
+                    f"({maximum_tangency_residual:.9g})"
+                )
+            if maximum_chord_error > 3e-5 * self.config.module:
+                raise RuntimeError(
+                    "Analytic involute tessellation error exceeds tolerance "
+                    f"({maximum_chord_error:.9g})"
+                )
+        elif self.config.profile == "cycloidal":
             drive, drive_phases = self._generate_swept_gear(False, samples_per_radian)
             driven, driven_phases = self._generate_conjugate_mate(
                 drive, samples_per_radian
@@ -1073,8 +1670,14 @@ class _GearGenerator:
             drive_centrode_outline_distance is not None
             and drive_centrode_outline_distance > centrode_fidelity_tolerance
         ):
+            failure = (
+                "Analytic involute arrangement did not preserve the requested "
+                "drive centrode"
+                if analytic_involute
+                else "Rack sweep self-occluded the requested drive centrode"
+            )
             raise RuntimeError(
-                "Rack sweep self-occluded the requested drive centrode "
+                f"{failure} "
                 f"(outline distance {drive_centrode_outline_distance:.9g}, "
                 f"tooth-envelope tolerance {centrode_fidelity_tolerance:.9g})"
             )
@@ -1085,8 +1688,13 @@ class _GearGenerator:
             )
             outline_area = abs(_signed_area(drive))
             if outline_area < 0.75 * pitch_area:
+                backend_name = (
+                    "Analytic involute arrangement"
+                    if analytic_involute
+                    else "Rack sweep"
+                )
                 raise RuntimeError(
-                    "Rack sweep disconnected the intended drive-gear body "
+                    f"{backend_name} disconnected the intended drive-gear body "
                     f"(outline area {outline_area:.9g}, drive-centrode enclosed "
                     f"area {pitch_area:.9g})"
                 )
@@ -1103,6 +1711,14 @@ class _GearGenerator:
             + 0.5 * math.pi * self.config.module
         )
         total_phases = drive_phases + driven_phases
+        profile_family = (
+            "generalized_involute"
+            if analytic_involute
+            else f"{self.config.profile}_rack"
+        )
+        generation_backend = (
+            "analytic_form" if analytic_involute else "sampled_cutter_sweep"
+        )
         metadata: dict[str, object] = {
             "name": self.config.name,
             "description": self.config.description,
@@ -1115,7 +1731,8 @@ class _GearGenerator:
             "period": self.config.period,
             "cycle_delta": self.config.cycle_delta,
             "centrode_reference_center_distance": self.config.reference_center_distance,
-            "profile_family": f"{self.config.profile}_rack",
+            "profile_family": profile_family,
+            "generation_backend": generation_backend,
             "geometry_backend": "shapely-geos",
             "geometry_precision": "double",
             "geometry_worker_limit": _MAX_GEOMETRY_WORKERS,
@@ -1128,7 +1745,9 @@ class _GearGenerator:
             "center_distance": self.center_distance,
             "undercut_curvature_limit": self.curvature_limit,
             "maximum_join_gap": 0.0,
-            "maximum_intersection_residual": 0.0,
+            "maximum_intersection_residual": (
+                maximum_envelope_residual if analytic_involute else 0.0
+            ),
             "placed_pair_overlap_area": maximum_overlap,
             "centrodes_are_convex": self.centrodes_are_convex,
             "maximum_drive_curvature": self.maximum_drive_curvature,
@@ -1136,10 +1755,25 @@ class _GearGenerator:
             "drive_centrode_outline_distance": drive_centrode_outline_distance,
             "centrode_fidelity_tolerance": centrode_fidelity_tolerance,
             "cutter_sweep_phase_count": total_phases,
+            "analytic_flank_sample_count": analytic_flank_sample_count,
+            "maximum_envelope_residual": maximum_envelope_residual,
+            "maximum_envelope_tangency_residual": maximum_tangency_residual,
+            "maximum_analytic_chord_error": maximum_chord_error,
+            "nonworking_closure": (
+                "radial_inset_with_linear_connectors"
+                if analytic_involute
+                else "generated_cutter_root"
+            ),
+            "requested_fillet_radius": self.fillet_radius,
+            "requested_fillet_applied_to_closure": not analytic_involute,
             "verification_phase_count": verification_phases,
-            "sweep_angular_step": max(
-                self.drive_cycle / drive_phases,
-                self.driven_cycle / driven_phases,
+            "sweep_angular_step": (
+                0.0
+                if analytic_involute
+                else max(
+                    self.drive_cycle / drive_phases,
+                    self.driven_cycle / driven_phases,
+                )
             ),
             "maximum_transmission_error": transmission_error,
             "maximum_sliding_velocity_factor": (1.0 + maximum_ratio)
@@ -1151,9 +1785,14 @@ class _GearGenerator:
             "driven_area": _signed_area(driven),
         }
         log = (
-            f"Generated {self.config.name} with Shapely/GEOS: "
+            f"Generated {self.config.name} with {generation_backend} "
+            "and Shapely/GEOS: "
             f"{self.drive_teeth}:{self.driven_teeth} teeth, "
-            f"{total_phases} cutter poses"
+            + (
+                f"{analytic_flank_sample_count} analytic flank samples"
+                if analytic_involute
+                else f"{total_phases} cutter poses"
+            )
         )
         return EngineResult(drive, driven, metadata, log)
 

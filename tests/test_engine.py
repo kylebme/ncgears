@@ -14,9 +14,20 @@ def _assert_verified_pair(pair: ncgears.GearPair) -> None:
     assert pair.metadata["geometry_backend"] == "shapely-geos"
     assert pair.metadata["geometry_precision"] == "double"
     assert pair.metadata["geometry_worker_limit"] >= 1
-    assert pair.metadata["cutter_sweep_phase_count"] >= 24 * (
-        pair.drive_teeth + pair.driven_teeth
-    )
+    if pair.metadata["generation_backend"] == "analytic_form":
+        assert pair.metadata["cutter_sweep_phase_count"] == 0
+        assert pair.metadata["analytic_flank_sample_count"] >= 128 * (
+            pair.drive_teeth + pair.driven_teeth
+        )
+        assert pair.metadata["maximum_envelope_residual"] < 1e-9
+        assert pair.metadata["maximum_envelope_tangency_residual"] < 1e-10
+        assert pair.metadata["maximum_analytic_chord_error"] < (
+            3e-5 * pair.metadata["module"]
+        )
+    else:
+        assert pair.metadata["cutter_sweep_phase_count"] >= 24 * (
+            pair.drive_teeth + pair.driven_teeth
+        )
     assert pair.metadata["verification_phase_count"] >= 48
     assert pair.metadata["minimum_root_radius"] > 0.0
     assert pair.maximum_transmission_error < 0.01
@@ -116,6 +127,8 @@ def test_mild_nonconvex_centrode_stays_within_tooth_envelope(
 
     _assert_verified_pair(pair)
     assert pair.metadata["centrodes_are_convex"] is False
+    assert pair.metadata["profile_family"] == "generalized_involute"
+    assert pair.metadata["generation_backend"] == "analytic_form"
     assert pair.metadata["maximum_drive_curvature"] > 0.0
     assert (
         pair.metadata["drive_centrode_outline_distance"]
@@ -123,15 +136,30 @@ def test_mild_nonconvex_centrode_stays_within_tooth_envelope(
     )
 
 
-def test_self_occluded_nonconvex_centrode_is_rejected(tmp_path: Path) -> None:
-    with pytest.raises(ncgears.GenerationError, match="Rack sweep self-occluded"):
-        ncgears.generate_from_centrode(
-            "1 + 0.08*cos(5*phi)",
-            name="self_occluded",
-            teeth=100,
-            target_cycle_delta=5.0 * math.pi,
-            profile="cycloidal",
-            samples=1024,
-            samples_per_radian=20,
-            output_directory=tmp_path,
-        )
+def test_deep_nonconvex_centrode_uses_analytic_involute_form(
+    tmp_path: Path,
+) -> None:
+    pair = ncgears.generate_from_centrode(
+        "1 + 0.08*cos(5*phi)",
+        name="deep_nonconvex",
+        teeth=100,
+        target_cycle_delta=5.0 * math.pi,
+        profile="involute",
+        samples=1024,
+        samples_per_radian=20,
+        output_directory=tmp_path,
+    )
+
+    _assert_verified_pair(pair)
+    drive = Polygon(pair.drive_outline)
+    relative_concavity = (drive.convex_hull.area - drive.area) / drive.area
+    assert pair.drive_teeth == 100
+    assert pair.driven_teeth == 40
+    assert pair.metadata["centrodes_are_convex"] is False
+    assert pair.metadata["generation_backend"] == "analytic_form"
+    assert pair.metadata["profile_family"] == "generalized_involute"
+    assert relative_concavity > 0.05
+    assert (
+        pair.metadata["drive_centrode_outline_distance"]
+        <= pair.metadata["centrode_fidelity_tolerance"]
+    )
