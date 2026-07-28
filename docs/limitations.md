@@ -3,7 +3,7 @@
 The generator treats convexity as a diagnostic rather than a construction
 precondition. Inflections and nonconvex centrodes are handled by subtracting
 the global swept cutter solid from a gear blank and selecting the largest
-hub-connected result.
+hub-connected result. Nonconvex centrodes are currently not properly supported and a best effort gear will be generated.
 
 ## What "general purpose" means
 

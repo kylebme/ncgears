@@ -5,7 +5,7 @@ pitch-curve shape.
 
 The generator creates 2D outlines, verifies the assembled pair for interference
 and contact-motion error, and exports CSV, SVG, DXF, JSON, PNG, and animated GIF
-files. It supports closed gears, finite open segments, nonconvex pitch curves,
+files. It supports closed gears, finite open segments,
 unequal ratios, and involute-rack or cycloidal-rack tooth families.
 The complete application and geometry pipeline are implemented in Python;
 Shapely/GEOS provides robust floating-point polygon operations.
