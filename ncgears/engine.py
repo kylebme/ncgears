@@ -1723,11 +1723,8 @@ class _GearGenerator:
         """Build material inward of the exact dedendum offset."""
 
         teeth = self.driven_teeth if driven else self.drive_teeth
-        if self.closed:
-            start_arc = 0.0
-            end_arc = teeth * math.pi * self.config.module
-        else:
-            start_arc, end_arc = self._analytic_common_arc_bounds()
+        start_arc = 0.0
+        end_arc = teeth * math.pi * self.config.module
         curve = lambda values: self._analytic_offset_points(
             driven=driven,
             common_arc=values,
@@ -1776,10 +1773,21 @@ class _GearGenerator:
         """Arrange exact flank, rack-tip, addendum, and dedendum curves."""
 
         teeth = self.driven_teeth if driven else self.drive_teeth
-        phases: list[float] = (
-            [float(phase) for phase in range(teeth + 1)]
+        phase_sides: list[tuple[float, int]] = (
+            [
+                (float(phase), sign)
+                for phase in range(teeth + 1)
+                for sign in (-1, 1)
+            ]
             if self.closed
-            else [phase + 0.5 for phase in range(-1, teeth + 1)]
+            else [
+                *[
+                    (phase + 0.5, sign)
+                    for phase in range(teeth)
+                    for sign in (-1, 1)
+                ],
+                (teeth + 0.5, -1),
+            ]
         )
         geometries: dict[tuple[float, int], _AnalyticFlankGeometry] = {}
         fillets: dict[tuple[float, int], NDArray[np.complex128]] = {}
@@ -1794,52 +1802,52 @@ class _GearGenerator:
         maximum_fillet_root_residual = 0.0
         undercut_count = 0
 
-        for tooth_phase in phases:
-            for sign in (-1, 1):
-                geometry = self._analytic_flank_geometry(
+        for tooth_phase, sign in phase_sides:
+            geometry = self._analytic_flank_geometry(
+                driven=driven,
+                tooth_phase=tooth_phase,
+                sign=sign,
+            )
+            geometries[tooth_phase, sign] = geometry
+            maximum_intersection_residual = max(
+                maximum_intersection_residual,
+                geometry.intersection_residual,
+            )
+            fillet_root = self._analytic_fillet_points(
+                driven=driven,
+                tooth_phase=tooth_phase,
+                sign=sign,
+                common_arc=np.asarray([geometry.fillet_root_arc]),
+            )[0]
+            dedendum_root = self._analytic_offset_points(
+                driven=driven,
+                common_arc=np.asarray([geometry.fillet_root_arc]),
+                height=-self.dedendum,
+            )[0]
+            maximum_fillet_root_residual = max(
+                maximum_fillet_root_residual,
+                abs(fillet_root - dedendum_root),
+            )
+            undercut_count += int(geometry.undercut)
+            flank, count, envelope, tangency, chord = (
+                self._sample_analytic_flank(
                     driven=driven,
-                    tooth_phase=tooth_phase,
-                    sign=sign,
+                    geometry=geometry,
+                    samples_per_radian=samples_per_radian,
                 )
-                geometries[tooth_phase, sign] = geometry
-                maximum_intersection_residual = max(
-                    maximum_intersection_residual,
-                    geometry.intersection_residual,
-                )
-                fillet_root = self._analytic_fillet_points(
-                    driven=driven,
-                    tooth_phase=tooth_phase,
-                    sign=sign,
-                    common_arc=np.asarray([geometry.fillet_root_arc]),
-                )[0]
-                dedendum_root = self._analytic_offset_points(
-                    driven=driven,
-                    common_arc=np.asarray([geometry.fillet_root_arc]),
-                    height=-self.dedendum,
-                )[0]
-                maximum_fillet_root_residual = max(
-                    maximum_fillet_root_residual,
-                    abs(fillet_root - dedendum_root),
-                )
-                undercut_count += int(geometry.undercut)
-                flank, count, envelope, tangency, chord = (
-                    self._sample_analytic_flank(
-                        driven=driven,
-                        geometry=geometry,
-                        samples_per_radian=samples_per_radian,
-                    )
-                )
-                flanks[tooth_phase, sign] = flank
-                total_samples += count
-                flank_sample_count += count
-                maximum_envelope_residual = max(
-                    maximum_envelope_residual, envelope
-                )
-                maximum_tangency_residual = max(
-                    maximum_tangency_residual, tangency
-                )
-                maximum_chord_error = max(maximum_chord_error, chord)
-                fillet_curve = lambda values, phase=tooth_phase, side=sign: (
+            )
+            flanks[tooth_phase, sign] = flank
+            total_samples += count
+            flank_sample_count += count
+            maximum_envelope_residual = max(
+                maximum_envelope_residual, envelope
+            )
+            maximum_tangency_residual = max(
+                maximum_tangency_residual, tangency
+            )
+            maximum_chord_error = max(maximum_chord_error, chord)
+            fillet_curve = (
+                lambda values, phase=tooth_phase, side=sign: (
                     self._analytic_fillet_points(
                         driven=driven,
                         tooth_phase=phase,
@@ -1847,16 +1855,241 @@ class _GearGenerator:
                         common_arc=values,
                     )
                 )
-                fillet, count, chord = self._sample_analytic_curve(
-                    fillet_curve,
-                    geometry.fillet_root_arc,
-                    geometry.fillet_transition_arc,
-                    samples_per_radian,
-                    minimum_samples=32,
+            )
+            fillet, count, chord = self._sample_analytic_curve(
+                fillet_curve,
+                geometry.fillet_root_arc,
+                geometry.fillet_transition_arc,
+                samples_per_radian,
+                minimum_samples=32,
+            )
+            fillets[tooth_phase, sign] = fillet
+            total_samples += count
+            maximum_chord_error = max(maximum_chord_error, chord)
+
+        if not self.closed:
+            body_span = (
+                float(self._psi(self.active_end))
+                - float(self._psi(self.active_start))
+                if driven
+                else self.active_end - self.active_start
+            )
+            if abs(body_span) >= 2.0 * math.pi - 1e-8:
+                raise ValueError(
+                    "Open gear body span must be less than one body revolution"
                 )
-                fillets[tooth_phase, sign] = fillet
+            active_start_arc = 0.0
+            active_end_arc = teeth * math.pi * self.config.module
+            boundary: list[complex] = []
+
+            def append_clipped_curve(
+                function: Callable[
+                    [FloatArray], NDArray[np.complex128]
+                ],
+                start: float,
+                end: float,
+                *,
+                minimum_samples: int,
+            ) -> None:
+                nonlocal total_samples, maximum_chord_error
+                low = max(min(start, end), active_start_arc)
+                high = min(max(start, end), active_end_arc)
+                if low >= high:
+                    return
+                clipped_start, clipped_end = (
+                    (low, high) if start <= end else (high, low)
+                )
+                piece, count, chord = self._sample_analytic_curve(
+                    function,
+                    clipped_start,
+                    clipped_end,
+                    samples_per_radian,
+                    minimum_samples=minimum_samples,
+                )
                 total_samples += count
-                maximum_chord_error = max(maximum_chord_error, chord)
+                maximum_chord_error = max(
+                    maximum_chord_error, chord
+                )
+                if boundary:
+                    gap = abs(boundary[-1] - piece[0])
+                    if gap <= 1e-10:
+                        boundary.extend(piece[1:])
+                        return
+                boundary.extend(piece)
+
+            involute = (
+                lambda phase, side: lambda values: (
+                    self._analytic_involute_points(
+                        driven=driven,
+                        tooth_phase=phase,
+                        sign=side,
+                        common_arc=values,
+                    )
+                )
+            )
+            fillet = (
+                lambda phase, side: lambda values: (
+                    self._analytic_fillet_points(
+                        driven=driven,
+                        tooth_phase=phase,
+                        sign=side,
+                        common_arc=values,
+                    )
+                )
+            )
+            offset = lambda height: lambda values: (
+                self._analytic_offset_points(
+                    driven=driven,
+                    common_arc=values,
+                    height=height,
+                )
+            )
+
+            # An open gear is one ordered analytical boundary. Clip every
+            # constituent curve in its rolling-arc parameter, rather than
+            # intersecting a padded solid with radial sector faces. The
+            # latter is only equivalent for circular constant-ratio gears.
+            for tooth in range(teeth):
+                tooth_phase = tooth + 0.5
+                minus = geometries[tooth_phase, -1]
+                plus = geometries[tooth_phase, 1]
+                next_minus = geometries[tooth_phase + 1.0, -1]
+                if driven:
+                    append_clipped_curve(
+                        involute(tooth_phase, -1),
+                        minus.flank_tip_arc,
+                        minus.flank_transition_arc,
+                        minimum_samples=128,
+                    )
+                    append_clipped_curve(
+                        fillet(tooth_phase, -1),
+                        minus.fillet_transition_arc,
+                        minus.fillet_root_arc,
+                        minimum_samples=32,
+                    )
+                    append_clipped_curve(
+                        offset(-self.dedendum),
+                        minus.fillet_root_arc,
+                        plus.fillet_root_arc,
+                        minimum_samples=32,
+                    )
+                    append_clipped_curve(
+                        fillet(tooth_phase, 1),
+                        plus.fillet_root_arc,
+                        plus.fillet_transition_arc,
+                        minimum_samples=32,
+                    )
+                    append_clipped_curve(
+                        involute(tooth_phase, 1),
+                        plus.flank_transition_arc,
+                        plus.flank_tip_arc,
+                        minimum_samples=128,
+                    )
+                    append_clipped_curve(
+                        offset(self.addendum),
+                        plus.addendum_tip_arc,
+                        next_minus.addendum_tip_arc,
+                        minimum_samples=32,
+                    )
+                else:
+                    append_clipped_curve(
+                        fillet(tooth_phase, -1),
+                        minus.fillet_root_arc,
+                        minus.fillet_transition_arc,
+                        minimum_samples=32,
+                    )
+                    append_clipped_curve(
+                        involute(tooth_phase, -1),
+                        minus.flank_transition_arc,
+                        minus.flank_tip_arc,
+                        minimum_samples=128,
+                    )
+                    append_clipped_curve(
+                        offset(self.addendum),
+                        minus.addendum_tip_arc,
+                        plus.addendum_tip_arc,
+                        minimum_samples=32,
+                    )
+                    append_clipped_curve(
+                        involute(tooth_phase, 1),
+                        plus.flank_tip_arc,
+                        plus.flank_transition_arc,
+                        minimum_samples=128,
+                    )
+                    append_clipped_curve(
+                        fillet(tooth_phase, 1),
+                        plus.fillet_transition_arc,
+                        plus.fillet_root_arc,
+                        minimum_samples=32,
+                    )
+                    append_clipped_curve(
+                        offset(-self.dedendum),
+                        plus.fillet_root_arc,
+                        next_minus.fillet_root_arc,
+                        minimum_samples=32,
+                    )
+
+            if len(boundary) < 3:
+                raise RuntimeError(
+                    "Generated open analytical boundary has too few points"
+                )
+            inner_boundary = lambda values: 0.25 * (
+                np.asarray(
+                    self._driven_centrode(
+                        self._phi_from_common_arc(values)
+                    )
+                    if driven
+                    else self._drive_centrode(
+                        self._phi_from_common_arc(values)
+                    ),
+                    dtype=np.complex128,
+                )
+            )
+            backing, count, chord = self._sample_analytic_curve(
+                inner_boundary,
+                active_end_arc,
+                active_start_arc,
+                samples_per_radian,
+                minimum_samples=max(512, 32 * teeth),
+            )
+            total_samples += count
+            maximum_chord_error = max(maximum_chord_error, chord)
+            if abs(boundary[-1] - backing[0]) > 1e-10:
+                boundary.extend(backing)
+            else:
+                boundary.extend(backing[1:])
+            if abs(boundary[-1] - boundary[0]) > 1e-12:
+                boundary.append(boundary[0])
+            else:
+                boundary[-1] = boundary[0]
+
+            coordinates = np.asarray(boundary, dtype=np.complex128)
+            arranged = make_valid(
+                Polygon(
+                    np.column_stack(
+                        (coordinates.real, coordinates.imag)
+                    )
+                )
+            )
+            polygon = _clean_polygon(arranged)
+            return _AnalyticGearResult(
+                outline=_outline(
+                    polygon, 2e-7 * max(1.0, self.config.module)
+                ),
+                sample_count=total_samples,
+                flank_sample_count=flank_sample_count,
+                maximum_envelope_residual=maximum_envelope_residual,
+                maximum_tangency_residual=maximum_tangency_residual,
+                maximum_chord_error=maximum_chord_error,
+                maximum_intersection_residual=(
+                    maximum_intersection_residual
+                ),
+                maximum_join_gap=maximum_join_gap,
+                maximum_fillet_root_residual=(
+                    maximum_fillet_root_residual
+                ),
+                undercut_count=undercut_count,
+            )
 
         root_blank, count, chord = self._analytic_root_blank(
             driven, samples_per_radian
@@ -1964,33 +2197,6 @@ class _GearGenerator:
             )
 
         arranged: Geometry = union_all(tooth_bodies)
-        if not self.closed:
-            if driven:
-                start_angle = float(self._psi(self.config.active_start)) + math.pi
-                end_angle = float(self._psi(self.config.active_end)) + math.pi
-            else:
-                start_angle = -self.config.active_start
-                end_angle = -self.config.active_end
-            if abs(end_angle - start_angle) >= 2.0 * math.pi - 1e-8:
-                raise ValueError(
-                    "Open gear body span must be less than one body revolution"
-                )
-            inner_radius = max(
-                0.08 * self.config.module, 0.22 * self.minimum_pitch_radius
-            )
-            outer_radius = (
-                self.maximum_pitch_radius
-                + self.addendum
-                + 2.5 * self.config.module
-            )
-            arranged = arranged.intersection(
-                _open_sector(
-                    start_angle,
-                    end_angle,
-                    inner_radius,
-                    outer_radius,
-                )
-            )
         polygon = _clean_polygon(arranged)
         outline = _outline(
             polygon, 2e-7 * max(1.0, self.config.module)
@@ -2036,11 +2242,8 @@ class _GearGenerator:
         """Return material inward of the pitch curve for root-only trimming."""
 
         teeth = self.driven_teeth if driven else self.drive_teeth
-        if self.closed:
-            start_arc = 0.0
-            end_arc = teeth * math.pi * self.config.module
-        else:
-            start_arc, end_arc = self._analytic_common_arc_bounds()
+        start_arc = 0.0
+        end_arc = teeth * math.pi * self.config.module
         sample_count = max(1024, 32 * teeth)
         common_arc = np.linspace(start_arc, end_arc, sample_count + 1)
         pitch_points = self._analytic_offset_points(
@@ -2079,74 +2282,24 @@ class _GearGenerator:
             )
         )
 
-    def _analytic_open_closure_zone(self, driven: bool) -> Geometry | None:
-        """Return the non-working end-relief band at each open end face."""
-
-        if self.closed:
-            return None
-        if driven:
-            start_angle = float(self._psi(self.config.active_start)) + math.pi
-            end_angle = float(self._psi(self.config.active_end)) + math.pi
-        else:
-            start_angle = -self.config.active_start
-            end_angle = -self.config.active_end
-        inner_radius = max(
-            0.08 * self.config.module, 0.20 * self.minimum_pitch_radius
-        )
-        outer_radius = (
-            self.maximum_pitch_radius
-            + self.addendum
-            + 2.5 * self.config.module
-        )
-        boundaries = []
-        for angle in (start_angle, end_angle):
-            direction = np.asarray([math.cos(angle), math.sin(angle)])
-            boundaries.append(
-                LineString(
-                    np.vstack(
-                        (inner_radius * direction, outer_radius * direction)
-                    )
-                )
-            )
-        # The public API guarantees at least 2.5 pitch intervals of source
-        # motion beyond each active endpoint. The same fringe identifies end
-        # teeth that may be relieved by the mate without touching the
-        # analytical working profile in the interior active span.
-        return union_all(boundaries).buffer(
-            2.5 * math.pi * self.config.module,
-            cap_style="flat",
-            join_style="mitre",
-        )
-
     def _trim_rolling_nonworking_interference(
         self, drive: FloatArray, driven: FloatArray
     ) -> tuple[FloatArray, FloatArray, int, float, float, float]:
         """Trim non-working interference by rolling the finished pair.
 
         The analytical profiles remain authoritative outside their pitch
-        curves and, for open profiles, outside the padded end-relief bands. At
-        each rolling pose GEOS computes actual solid overlap; only portions in
-        those non-working regions are eligible for removal. Four staggered
-        phase grids prevent a favorable tooth-grid alignment from hiding an
-        undercut.
+        curves. At each rolling pose GEOS computes actual solid overlap; only
+        portions inward of the pitch curves are eligible for removal. Four
+        staggered phase grids prevent a favorable tooth-grid alignment from
+        hiding an undercut.
         """
 
         drive_geometry: Geometry = Polygon(drive[:-1])
         driven_geometry: Geometry = Polygon(driven[:-1])
         drive_root_zone = self._analytic_pitch_material(False)
         driven_root_zone = self._analytic_pitch_material(True)
-        drive_closure_zone = self._analytic_open_closure_zone(False)
-        driven_closure_zone = self._analytic_open_closure_zone(True)
-        drive_trim_zone = (
-            union_all([drive_root_zone, drive_closure_zone])
-            if drive_closure_zone is not None
-            else drive_root_zone
-        )
-        driven_trim_zone = (
-            union_all([driven_root_zone, driven_closure_zone])
-            if driven_closure_zone is not None
-            else driven_root_zone
-        )
+        drive_trim_zone = drive_root_zone
+        driven_trim_zone = driven_root_zone
         phase_count = (
             max(96, 4 * max(self.drive_teeth, self.driven_teeth))
             if self.closed
@@ -2157,7 +2310,11 @@ class _GearGenerator:
             * self.config.module**2
             * max(self.drive_teeth, self.driven_teeth)
         )
-        classification_tolerance = 1e-10 * self.config.module**2
+        # Endpoint closure faces can be analytically coincident while their
+        # independently tessellated polygons enclose a minute sliver. Apply
+        # the same certified area tolerance used by final rolling
+        # verification; eligible cuts remain restricted to the root masks.
+        classification_tolerance = overlap_tolerance
         # Buffer by one certified chord-error allowance so finite-precision
         # Boolean boundaries do not leave a sliver of the measured overlap.
         trim_clearance = (
@@ -2222,50 +2379,14 @@ class _GearGenerator:
                 driven_root_overlap = overlap.intersection(
                     placed_driven_root
                 )
-                drive_closure_overlap: Geometry | None = None
-                driven_closure_overlap: Geometry | None = None
                 coverage: list[Geometry] = [
                     drive_root_overlap,
                     driven_root_overlap,
                 ]
-                if drive_closure_zone is not None:
-                    drive_closure_overlap = overlap.intersection(
-                        self._place_geometry(
-                            drive_closure_zone, drive_angle
-                        )
-                    )
-                    coverage.append(drive_closure_overlap)
-                if driven_closure_zone is not None:
-                    driven_closure_overlap = overlap.intersection(
-                        self._place_geometry(
-                            driven_closure_zone,
-                            driven_angle,
-                            self.center_distance,
-                        )
-                    )
-                    coverage.append(driven_closure_overlap)
                 covered = union_all(coverage)
                 uncovered_area = float(overlap.difference(covered).area)
-                drive_overlap = union_all(
-                    [
-                        drive_root_overlap,
-                        *(
-                            [drive_closure_overlap]
-                            if drive_closure_overlap is not None
-                            else []
-                        ),
-                    ]
-                )
-                driven_overlap = union_all(
-                    [
-                        driven_root_overlap,
-                        *(
-                            [driven_closure_overlap]
-                            if driven_closure_overlap is not None
-                            else []
-                        ),
-                    ]
-                )
+                drive_overlap = drive_root_overlap
+                driven_overlap = driven_root_overlap
                 local_drive_cut = (
                     self._unplace_geometry(
                         drive_overlap, drive_angle
@@ -2676,11 +2797,7 @@ class _GearGenerator:
             "maximum_intersection_residual": maximum_intersection_residual,
             "maximum_fillet_root_residual": maximum_fillet_root_residual,
             "analytic_undercut_count": analytic_undercut_count,
-            "rolling_nonworking_trim_scope": (
-                "pitch_side_roots"
-                if self.closed
-                else "pitch_side_roots_and_open_end_relief"
-            ),
+            "rolling_nonworking_trim_scope": "pitch_side_roots",
             "rolling_nonworking_trim_phase_count": rolling_trim_phase_count,
             "rolling_nonworking_initial_overlap_area": rolling_initial_overlap,
             "rolling_nonworking_sampled_overlap_area": rolling_sampled_overlap,

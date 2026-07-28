@@ -121,8 +121,10 @@ or sweeping a complete rack solid, so remote rack material cannot erase a
 pitch-curve concavity. Exact addendum and dedendum offsets complete each tooth.
 An independent non-working-profile rolling pass removes measured mate
 interference while refusing to alter material outside either pitch-side root
-region. Finite open profiles additionally permit relief in their padded end
-bands so the closing faces do not collide near the motion endpoints.
+region. Finite open profiles clip each analytical curve in rolling-arc
+parameter space, then follow one quarter of the centrode back across the inner
+boundary. Source-domain padding is used only to solve endpoint teeth; it cannot
+change or clip the finished body.
 
 ## Closed and open designs
 
@@ -151,14 +153,16 @@ pair = ncgears.generate(
 The Python engine uses analytic generalized-involute branches for every
 involute gear, including finite open profiles and nonconvex centrodes.
 Shapely/GEOS nodes the exact flank, rack-tip fillet, addendum, and dedendum
-curves and arranges complete tooth bodies. Only legacy cycloidal-eased cases
-continue to use sampled cutter sweeps. A successful result includes checks for:
+curves and arranges complete tooth bodies. Open bodies use an ordered,
+parameter-clipped analytical boundary rather than a radial sector
+intersection. Only legacy cycloidal-eased cases continue to use sampled cutter
+sweeps. A successful result includes checks for:
 
 - simple, hub-connected gear bodies
 - sampled whole-cycle solid interference
 - contact motion recovered from the finished outlines
 - analytic envelope/tangency, intersection, join, and chord residuals
-- non-working root/end rolling clearance without interior flank modification
+- non-working root rolling clearance without interior flank modification
 - root radius, tip thickness, and centrode curvature
 - drive-outline fidelity to the requested centrode
 - sliding-velocity and undercut diagnostics

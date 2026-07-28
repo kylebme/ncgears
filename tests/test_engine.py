@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from shapely.geometry import Polygon
+from shapely.geometry import LineString, Point, Polygon
 
 import ncgears
 
@@ -141,27 +141,85 @@ def test_python_engine_generates_open_segment(tmp_path: Path) -> None:
     )
 
 
-def test_open_profile_rolls_end_closures_outside_working_span(
+def test_open_high_ratio_needs_only_documented_minimum_padding(
     tmp_path: Path,
 ) -> None:
     pair = ncgears.generate(
-        "1.35*phi + 0.025*phi**2",
-        name="open_quadratic_end_relief",
-        teeth=16,
+        "2.2*phi",
+        name="open_high_ratio_minimum_padding",
+        teeth=12,
         open_=True,
-        drive_end=3.2,
-        padding_pitches=8.0,
+        drive_end=2.6,
+        padding_pitches=2.5,
         samples=1024,
         samples_per_radian=20,
         output_directory=tmp_path,
     )
 
     _assert_verified_pair(pair)
-    assert pair.metadata["rolling_nonworking_trim_scope"] == (
-        "pitch_side_roots_and_open_end_relief"
-    )
-    assert pair.metadata["rolling_nonworking_removed_area"] > 1.0
-    assert pair.metadata["placed_pair_overlap_area"] == pytest.approx(0.0)
+    assert pair.ratio == pytest.approx(2.2)
+
+
+def test_open_quadratic_uses_parameter_clipped_padding_invariant_boundary(
+    tmp_path: Path,
+) -> None:
+    pairs = [
+        ncgears.generate(
+            "1.35*phi + 0.025*phi**2",
+            name=f"open_quadratic_padding_{padding:g}",
+            teeth=16,
+            open_=True,
+            drive_end=3.2,
+            padding_pitches=padding,
+            samples=2048,
+            samples_per_radian=20,
+            output_directory=tmp_path,
+        )
+        for padding in (2.5, 8.0)
+    ]
+    for pair in pairs:
+        _assert_verified_pair(pair)
+        assert pair.metadata["rolling_nonworking_trim_scope"] == (
+            "pitch_side_roots"
+        )
+        assert pair.metadata["rolling_nonworking_removed_area"] < 0.1
+
+        # The open backing curve is the historical analytical closure:
+        # one quarter of each centrode over the active interval. A radial
+        # sector clip cannot satisfy this for an accelerating motion law.
+        phi = np.linspace(0.0, 3.2, 33)
+        psi = 1.35 * phi + 0.025 * phi**2
+        ratio = 1.35 + 0.05 * phi
+        center = pair.center_distance
+        drive_inner = (
+            0.25
+            * center
+            * ratio
+            / (1.0 + ratio)
+            * np.exp(-1j * phi)
+        )
+        driven_inner = (
+            -0.25
+            * center
+            / (1.0 + ratio)
+            * np.exp(1j * psi)
+        )
+        for outline, inner in (
+            (pair.drive_outline, drive_inner),
+            (pair.driven_outline, driven_inner),
+        ):
+            boundary = LineString(outline)
+            assert max(
+                boundary.distance(Point(value.real, value.imag))
+                for value in inner
+            ) < 2e-4
+
+    shallow_padding, deep_padding = pairs
+    for member in ("drive_outline", "driven_outline"):
+        shallow = Polygon(getattr(shallow_padding, member))
+        deep = Polygon(getattr(deep_padding, member))
+        assert shallow.hausdorff_distance(deep) < 2e-4
+        assert abs(shallow.area - deep.area) < 2e-4
 
 
 def test_cycloidal_mate_uses_conservative_sampled_envelope(
