@@ -1,26 +1,23 @@
-# Production methods for nonconvex centrodes
+# Direct profile construction for nonconvex centrodes
 
 ## Decision
 
-The full-width rack sweep must not be extended to deep nonconvex centrodes.
-At a concave pitch point, the tangent rack can intersect distant parts of the
-workpiece. That is a physical rack/hob access failure, not a Boolean-geometry
-failure.
+The full-width rack sweep must not be extended to deep nonconvex centrodes. At
+a concave pitch point, the tangent rack can intersect distant parts of the
+workpiece. That explains the current backend's failure, but it is not a
+manufacturing restriction when the finished outline will be molded, sintered,
+or printed.
 
-Use separate profile-specific construction engines:
+Generate the mathematical form directly with two profile-specific construction
+engines:
 
 1. **Generalized involute:** construct the local envelope of straight rack
    flanks analytically, assemble the valid branches against an explicit
-   nonconvex blank, and manufacture the resulting form by wire EDM, profile
-   milling, or another describing process.
+   nonconvex blank, and certify the active flanks against the analytic envelope
+   and base-curve involute identities.
 2. **Strict cycloidal:** construct the tooth flanks as rolling-circle roulettes
    on the noncircular centrodes, assemble conjugate addendum/dedendum branches,
-   and use the same form-cut manufacturing routes.
-3. **Pinion-shaper backend:** add a compact circular shaper cutter when a
-   generating manufacturing process is required. This is the preferred
-   physical cutter for concave pitch curves, but its output must be identified
-   as shaper-generated unless it also passes the selected involute or cycloidal
-   profile certificate.
+   and certify the rolling invariants and paired contact state.
 
 Do not call an arbitrary finite rack, a locally fitted circular tooth, or a
 conjugate sweep alone "involute" or "cycloidal."
@@ -117,18 +114,44 @@ show that, at each intended contact:
 - the contact parameters advance continuously without switching to a remote
   envelope branch.
 
+## Form-replicated manufacturing
+
+Molding and additive manufacturing reproduce a supplied form; they do not
+require a rack, hob, or shaper to reach every point of the finished outline.
+The rack or rolling circle in these constructions is therefore a mathematical
+generator, not a required production tool.
+
+Only the active working flanks need the involute or cycloidal certificate.
+Tip lands, root closures, hub boundaries, and root fillets may be constructed
+for clearance, strength, and minimum feature size provided adaptive
+full-cycle contact tracing proves that they never enter the working contact
+set. If such a closure does enter contact, it must either satisfy the selected
+profile definition or the design must be rejected.
+
+Manufacturing compensation belongs after certified two-dimensional geometry:
+
+- axial mold draft may be added without changing the certified transverse
+  section;
+- uniform shrink scaling preserves the profile construction if the center
+  distance, module, and all generator lengths are scaled together;
+- nonuniform shrink, anisotropic print compensation, smoothing, and mesh
+  decimation can change flank normals and must be applied to a copy followed
+  by the same contact and profile checks;
+- root fillet and minimum-wall adjustments must remain outside the certified
+  active-flank parameter intervals.
+
 ## Candidate methods
 
-| Method | Deep concavity | Profile proof | Manufacturing | Recommendation |
-|---|---|---|---|---|
-| Analytic local straight-flank envelope | Yes, subject to pair interference and root connectivity | Strong generalized-involute proof | Form cut, EDM, profile milling | Primary involute backend |
-| Rolling-circle roulette | Yes, subject to rolling-circle reach and branch validity | Strong strict-cycloidal proof | Form cut, EDM, profile milling | Primary cycloidal backend |
-| Noncircular pin-cycloid pair | Yes, subject to pin/cutter reach | Strong circular-pin/cycloidal-envelope proof | Pins or form-cut cycloidal wheel | Best strict-cycloidal option if a pin-wheel topology is acceptable |
-| Circular pinion shaper sweep | Yes, until the compact cutter itself loses access | Exact cutter-envelope/conjugacy proof; family label depends on cutter and certificate | Standard CNC gear shaping | Primary generative-manufacturing option |
-| Full rack/hob sweep | No for deep concavity | Strong when accessible | Rack cutting or hobbing | Keep for convex/mild cases |
-| Arbitrarily truncated rack | Sometimes visually | End caps and truncation can enter the envelope | No stable process definition | Reject |
-| Local osculating circular teeth | Approximate | Neither exact involute nor exact cycloidal | Easy | Reject for production |
-| Master outline plus conjugate mate sweep | Produces a conjugate mate | Proves conjugacy only; does not prove both family labels | Form cut | Verification/fallback, not a family proof |
+| Method | Deep concavity | Profile proof | Role |
+|---|---|---|---|
+| Analytic local straight-flank envelope | Yes, subject to pair interference and root connectivity | Strong generalized-involute proof | Primary involute backend |
+| Rolling-circle roulette | Yes, subject to rolling-circle reach and branch validity | Strong strict-cycloidal proof | Primary cycloidal backend |
+| Noncircular pin-cycloid pair | Yes, subject to pin reach | Strong circular-pin/cycloidal-envelope proof | Optional distinct topology |
+| Circular pinion-shaper envelope | Usually, subject to generator interference | Exact generator-envelope proof; family label depends on cutter and certificate | Reference or optional topology, not required for production |
+| Full rack sweep | No for deep concavity | Strong only where the complete rack remains local | Legacy backend for convex/mild cases |
+| Arbitrarily truncated rack | Sometimes visually | End caps and truncation can enter the envelope | Reject |
+| Local osculating circular teeth | Approximate | Neither exact involute nor exact cycloidal | Reject |
+| Master outline plus conjugate mate sweep | Produces a conjugate mate | Proves conjugacy only; does not prove both family labels | Pair validator/fallback, not a family proof |
 
 ## Recommended involute implementation
 
@@ -161,6 +184,10 @@ For every tooth:
 
 This keeps remote portions of a physical rack body out of the mathematical
 construction while retaining the exact straight-flank envelope.
+
+The arrangement may join working branches with non-profiled tip lands and root
+fillets. It must record the exact transition parameters so the verifier can
+prove that all intended contact stays on certified working branches.
 
 ### 3. Preserve segment provenance
 
@@ -208,14 +235,14 @@ the conjugate envelope equation. Keep this as a distinct topology because its
 contact, stress, backlash, and fabrication constraints differ from two
 conventional toothed wheels.
 
-## Pinion-shaper backend
+## Optional generator-equivalence backends
 
-A circular pinion shaper replaces the unbounded rack with a compact cutter. Its
-pitch circle rolls without slip on the workpiece centrode while the cutter
-center follows the appropriate normal offset. The generated profile is the
-envelope of the moving cutter teeth.
+A circular pinion generator can still be useful as an independent envelope
+implementation or for reproducing an existing shaper-defined profile. It is
+not needed to make a moldable or printable gear and is not the preferred fix
+for this project.
 
-Expose at least:
+If implemented, expose its mathematical generator parameters explicitly:
 
 ```text
 generation_backend = "pinion_shaper"
@@ -226,20 +253,16 @@ shaper_tip_clearance
 ```
 
 Use the analytic envelope equation for the final flanks; a dense Boolean cutter
-sweep may seed intervals and validate cutter-body clearance but should not be
-the source of the certified working curve.
-
-Required accessibility checks include:
-
-- cutter body versus protected blank outside the active tooth space;
-- cutter pitch-circle radius versus local concavity reach;
-- neighboring-tooth cutting interference;
-- cutter retraction path;
-- undercut and root thickness.
+sweep may seed intervals but should not be the source of the certified working
+curve. Cutter retraction and machine access are deliberately outside the
+geometry contract.
 
 Published CNC shaping work specifically identifies pinion shaping as the
 alternative for noncircular external gears with concave pitch curves and
-demonstrates a three-linkage process.
+demonstrates a three-linkage process. That result supports the feasibility of
+compact-generator envelopes, but it does not make a shaper backend necessary
+for form-replicated manufacturing or prove that its flanks satisfy this
+project's selected involute or cycloidal definition.
 
 ## Verification and proof certificate
 
@@ -256,7 +279,10 @@ maximum_involute_residual        # involute only
 maximum_roulette_radius_error    # cycloidal only
 maximum_roulette_roll_error      # cycloidal only
 maximum_centrode_outline_distance
-cutter_access_clearance
+minimum_nonworking_clearance
+minimum_tooth_thickness
+minimum_root_thickness
+minimum_feature_radius
 ```
 
 The involute certificate checks both the analytic rack-envelope equation and,
@@ -267,6 +293,10 @@ roulette state.
 
 Both certificates also require adaptive contact tracing over the complete
 cycle, not only recovery of collision at six off-grid phases.
+
+Exported manufacturing variants must name the compensation transform and
+either reference an unchanged certified transverse section or carry a new
+certificate produced after the transform.
 
 ## Acceptance cases
 
@@ -279,13 +309,15 @@ At minimum:
   5.89 modules;
 - `crazy_heart`, whose full-rack result loses the intended cleft;
 - a centrode with exact curvature-zero crossings;
-- a case whose compact shaper is too large, followed by a smaller shaper that
-  succeeds;
 - deliberately impossible cases rejected for pair interference, disconnected
-  root material, roulette cusp, or cutter inaccessibility.
+  root material, inadequate tooth thickness, or an unavoidable roulette cusp;
+- compensated manufacturing variants that preserve the certificate under
+  uniform scaling and fail it under deliberately excessive anisotropic
+  distortion.
 
 Success requires centrode fidelity, profile-certificate residuals, valid simple
-bodies, continuous intended contact, and no solid interference.
+bodies, continuous intended contact on certified flanks, adequate root
+connectivity and thickness, and no solid interference.
 
 ## Staged delivery
 
@@ -296,9 +328,11 @@ bodies, continuous intended contact, and no solid interference.
 3. Ship `involute + analytic_form` for nonconvex inputs.
 4. Implement strict rolling-circle cycloidal branches on the same arrangement
    kernel.
-5. Add the pinion-shaper backend and cutter-access simulation.
-6. Replace sampled contact recovery with adaptive contact tracing and emit the
+5. Replace sampled contact recovery with adaptive contact tracing and emit the
    proof certificate.
+6. Add manufacturing-copy export with uniform shrink/draft metadata and
+   mandatory revalidation for any operation that changes the transverse
+   profile.
 
 ## Primary references
 

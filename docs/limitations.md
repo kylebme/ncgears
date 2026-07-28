@@ -6,19 +6,21 @@ rack-cutter solid from a gear blank and selects the largest hub-connected
 result.
 
 A complete straight rack cannot enter an arbitrarily deep concavity: a tangent
-inside the concavity can cross and cut distant parts of the intended gear. This
-is rack self-occlusion, not a Boolean-geometry precision problem. A connected
-leftover body can still form a conjugate cam-like pair while no longer tracing
-the requested centrode. Closed outputs are therefore rejected when the
-Hausdorff distance between the drive outline and its centrode exceeds the
-larger tooth height plus fillet and numerical allowances recorded by
-`drive_centrode_outline_distance` and `centrode_fidelity_tolerance`.
+inside the concavity can cross and cut distant parts of the intended gear. In
+the current implementation this is global rack-solid self-occlusion, not a
+Boolean-geometry precision problem. It does not imply that the intended form
+cannot be molded, sintered, or printed. A connected leftover body can still
+form a conjugate cam-like pair while no longer tracing the requested centrode.
+Closed outputs are therefore rejected when the Hausdorff distance between the
+drive outline and its centrode exceeds the larger tooth height plus fillet and
+numerical allowances recorded by `drive_centrode_outline_distance` and
+`centrode_fidelity_tolerance`.
 
-Supporting deeper concavities requires a different manufacturing model, such as
-a local form/slotting cutter plus an explicit nonconvex gear blank, rather than
-shortening the rack by an arbitrary amount. See
-[Production methods for nonconvex centrodes](nonconvex-production-methods.md)
-for the recommended analytic, rolling-circle, and pinion-shaper designs.
+Supporting deeper concavities requires a different geometry backend that
+constructs certified local working flanks against an explicit nonconvex blank,
+rather than shortening a fictitious rack by an arbitrary amount. See
+[Direct profile construction for nonconvex centrodes](nonconvex-production-methods.md)
+for the recommended analytic involute and rolling-circle cycloidal designs.
 
 ## What "general purpose" means
 
