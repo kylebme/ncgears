@@ -16,7 +16,9 @@ larger tooth height plus fillet and numerical allowances recorded by
 
 Supporting deeper concavities requires a different manufacturing model, such as
 a local form/slotting cutter plus an explicit nonconvex gear blank, rather than
-shortening the rack by an arbitrary amount.
+shortening the rack by an arbitrary amount. See
+[Production methods for nonconvex centrodes](nonconvex-production-methods.md)
+for the recommended analytic, rolling-circle, and pinion-shaper designs.
 
 ## What "general purpose" means
 
