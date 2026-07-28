@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ncgears"
-version = "0.2.0"
+version = "0.2.1"
 description = "Generate noncircular gears with a Python and Shapely geometry engine"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -36,13 +36,7 @@ dependencies = [
 plot = ["matplotlib>=3.8", "pillow>=10"]
 test = ["pillow>=10", "pytest>=8"]
 build = ["build>=1.2"]
-dev = [
-  "build>=1.2",
-  "matplotlib>=3.8",
-  "pillow>=10",
-  "pytest>=8",
-  "ruff>=0.9",
-]
+dev = ["build>=1.2", "matplotlib>=3.8", "pillow>=10", "pytest>=8", "ruff>=0.9"]
 
 [project.scripts]
 ncgears = "ncgears.cli:main"

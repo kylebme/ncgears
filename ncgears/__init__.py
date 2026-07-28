@@ -15,4 +15,4 @@ __all__ = [
     "generate_from_transmission",
     "native_generator",
 ]
-__version__ = "0.2.0"
+__version__ = "0.2.1"
