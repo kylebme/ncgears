@@ -5,8 +5,9 @@ pitch-curve shape.
 
 The generator creates 2D outlines, verifies the assembled pair for interference
 and contact-motion error, and exports CSV, SVG, DXF, JSON, PNG, and animated GIF
-files. It supports closed gears, finite open segments, nonconvex pitch curves,
-unequal ratios, and involute-rack or cycloidal-rack tooth families.
+files. It supports closed gears, finite open segments, mild nonconvex pitch
+curves that remain accessible to a straight rack, unequal ratios, and
+involute-rack or cycloidal-rack tooth families.
 The complete application and geometry pipeline are implemented in Python;
 Shapely/GEOS provides robust floating-point polygon operations.
 
@@ -106,7 +107,7 @@ one mate revolution. A specific ratio can be selected with
 import math
 
 pair = ncgears.generate_from_centrode(
-    "1 + 0.05*cos(5*phi)",
+    "1 + 0.04*cos(5*phi)",
     teeth=100,
     target_cycle_delta=5 * math.pi,
     profile="cycloidal",
@@ -145,6 +146,7 @@ polygon operations. A successful result includes checks for:
 - sampled whole-cycle solid interference
 - contact motion recovered from the finished outlines
 - sweep resolution, root radius, tip thickness, and centrode curvature
+- drive-outline fidelity to the requested centrode
 - sliding-velocity and undercut diagnostics
 
 `metadata.json` records `geometry_backend: "shapely-geos"`, double-precision

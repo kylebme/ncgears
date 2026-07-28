@@ -1,9 +1,22 @@
 # Physical and numerical boundaries
 
-The generator treats convexity as a diagnostic rather than a construction
-precondition. Inflections and nonconvex centrodes are handled by subtracting
-the global swept cutter solid from a gear blank and selecting the largest
-hub-connected result.
+The generator accepts inflections and mild nonconvexity when every rack pose
+remains local to the requested tooth envelope. It subtracts the global swept
+rack-cutter solid from a gear blank and selects the largest hub-connected
+result.
+
+A complete straight rack cannot enter an arbitrarily deep concavity: a tangent
+inside the concavity can cross and cut distant parts of the intended gear. This
+is rack self-occlusion, not a Boolean-geometry precision problem. A connected
+leftover body can still form a conjugate cam-like pair while no longer tracing
+the requested centrode. Closed outputs are therefore rejected when the
+Hausdorff distance between the drive outline and its centrode exceeds the
+larger tooth height plus fillet and numerical allowances recorded by
+`drive_centrode_outline_distance` and `centrode_fidelity_tolerance`.
+
+Supporting deeper concavities requires a different manufacturing model, such as
+a local form/slotting cutter plus an explicit nonconvex gear blank, rather than
+shortening the rack by an arbitrary amount.
 
 ## What "general purpose" means
 

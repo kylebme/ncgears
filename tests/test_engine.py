@@ -102,11 +102,13 @@ def test_cycloidal_mate_uses_conservative_sampled_envelope(
     assert pair.metadata["placed_pair_overlap_area"] <= tolerance
 
 
-def test_nonconvex_centrode_uses_global_sweep(tmp_path: Path) -> None:
+def test_mild_nonconvex_centrode_stays_within_tooth_envelope(
+    tmp_path: Path,
+) -> None:
     pair = ncgears.generate(
-        "phi + 0.18*sin(2*phi)",
+        "phi + 0.016*sin(5*phi)",
         name="nonconvex",
-        teeth=32,
+        teeth=60,
         samples=1024,
         samples_per_radian=20,
         output_directory=tmp_path,
@@ -115,3 +117,21 @@ def test_nonconvex_centrode_uses_global_sweep(tmp_path: Path) -> None:
     _assert_verified_pair(pair)
     assert pair.metadata["centrodes_are_convex"] is False
     assert pair.metadata["maximum_drive_curvature"] > 0.0
+    assert (
+        pair.metadata["drive_centrode_outline_distance"]
+        <= pair.metadata["centrode_fidelity_tolerance"]
+    )
+
+
+def test_self_occluded_nonconvex_centrode_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ncgears.GenerationError, match="Rack sweep self-occluded"):
+        ncgears.generate_from_centrode(
+            "1 + 0.08*cos(5*phi)",
+            name="self_occluded",
+            teeth=100,
+            target_cycle_delta=5.0 * math.pi,
+            profile="cycloidal",
+            samples=1024,
+            samples_per_radian=20,
+            output_directory=tmp_path,
+        )

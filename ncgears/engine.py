@@ -20,7 +20,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.integrate import cumulative_simpson, simpson
 from shapely import Geometry, make_valid, union_all
-from shapely.geometry import MultiPolygon, Point, Polygon
+from shapely.geometry import LineString, MultiPolygon, Point, Polygon
 
 FloatArray = NDArray[np.float64]
 _MAX_GEOMETRY_WORKERS = max(1, min(8, os.cpu_count() or 1))
@@ -1025,6 +1025,22 @@ class _GearGenerator:
             )
         return maximum_overlap, max(contact_deltas), phase_count
 
+    def _drive_centrode_outline_distance(self, drive: FloatArray) -> float | None:
+        if not self.closed:
+            return None
+        sample_count = max(4097, 128 * self.drive_teeth + 1)
+        phi = np.linspace(
+            self.active_start,
+            self.active_start + self.drive_cycle,
+            sample_count,
+        )
+        radius = np.asarray(self._drive_radius(phi), dtype=float)
+        centrode = radius * np.exp(-1j * phi)
+        centrode_line = LineString(
+            np.column_stack((centrode.real, centrode.imag))
+        )
+        return float(centrode_line.hausdorff_distance(LineString(drive)))
+
     def generate(self, samples_per_radian: int) -> EngineResult:
         if samples_per_radian < 20:
             raise ValueError("samples_per_radian must be at least 20")
@@ -1047,6 +1063,21 @@ class _GearGenerator:
                     False, samples_per_radian
                 )
                 driven, driven_phases = driven_future.result()
+        drive_centrode_outline_distance = self._drive_centrode_outline_distance(drive)
+        centrode_fidelity_tolerance = (
+            max(self.addendum, self.dedendum)
+            + self.fillet_radius
+            + 0.05 * self.config.module
+        )
+        if (
+            drive_centrode_outline_distance is not None
+            and drive_centrode_outline_distance > centrode_fidelity_tolerance
+        ):
+            raise RuntimeError(
+                "Rack sweep self-occluded the requested drive centrode "
+                f"(outline distance {drive_centrode_outline_distance:.9g}, "
+                f"tooth-envelope tolerance {centrode_fidelity_tolerance:.9g})"
+            )
         if self.closed:
             phi = np.linspace(self.active_start, self.active_end, 32769)
             pitch_area = float(
@@ -1102,6 +1133,8 @@ class _GearGenerator:
             "centrodes_are_convex": self.centrodes_are_convex,
             "maximum_drive_curvature": self.maximum_drive_curvature,
             "minimum_driven_curvature": self.minimum_driven_curvature,
+            "drive_centrode_outline_distance": drive_centrode_outline_distance,
+            "centrode_fidelity_tolerance": centrode_fidelity_tolerance,
             "cutter_sweep_phase_count": total_phases,
             "verification_phase_count": verification_phases,
             "sweep_angular_step": max(

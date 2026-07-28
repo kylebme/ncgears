@@ -75,14 +75,14 @@ CASES = [
     ),
     StressCase(
         name="stress_five_lobe_5_to_2",
-        expression="1 + 0.08*cos(5*phi)",
+        expression="1 + 0.04*cos(5*phi)",
         teeth=100,
         category="unequal_ratio_multilobe",
         target_cycle_delta=5.0 * math.pi,
         profile="cycloidal",
         note=(
-            "Nonconvex five-lobe centrode with a repeat-compatible 100:40 "
-            "tooth closure."
+            "Mild nonconvex five-lobe centrode with a repeat-compatible "
+            "100:40 tooth closure."
         ),
     ),
     StressCase(
@@ -96,7 +96,8 @@ CASES = [
         teeth=64,
         category="adversarial_harmonic",
         reference_center_distance=1.0,
-        note="Asymmetric mixture through the seventh harmonic.",
+        note="Expected rack self-occlusion from asymmetric mixed harmonics.",
+        expected_to_pass=False,
     ),
     StressCase(
         name="stress_direct_rosette",
@@ -117,7 +118,8 @@ CASES = [
         expression=("1 + 0.22*sin(phi) + 0.15*cos(2*phi) - 0.025*sin(3*phi)"),
         teeth=64,
         category="silhouette_inspired",
-        note="Heart-like asymmetric pitch shape with a pronounced upper cleft.",
+        note="Expected rack self-occlusion at the pronounced upper cleft.",
+        expected_to_pass=False,
     ),
     StressCase(
         name="crazy_teardrop",
@@ -145,7 +147,8 @@ CASES = [
         expression=("1 + 0.25*cos(phi) - 0.07*cos(2*phi) + 0.03*cos(3*phi)"),
         teeth=64,
         category="silhouette_inspired",
-        note="Strongly eccentric crescent/egg-like pitch shape.",
+        note="Expected rack self-occlusion in the eccentric concavity.",
+        expected_to_pass=False,
     ),
     StressCase(
         name="crazy_organic",
@@ -154,7 +157,8 @@ CASES = [
         ),
         teeth=64,
         category="silhouette_inspired",
-        note="Free-form organic pitch shape with harmonics through order five.",
+        note="Expected rack self-occlusion from the mixed higher harmonics.",
+        expected_to_pass=False,
     ),
     StressCase(
         name="stress_limit_three_lobe_shoulder",
@@ -179,14 +183,14 @@ CASES = [
     ),
     StressCase(
         name="stress_limit_five_lobe_5_to_2",
-        expression="1 + 0.18*cos(5*phi)",
+        expression="1 + 0.08*cos(5*phi)",
         teeth=100,
-        category="expected_disconnected_body_limit",
+        category="expected_rack_self_occlusion",
         target_cycle_delta=5.0 * math.pi,
         profile="cycloidal",
         note=(
-            "Deep five-lobe 100:40 closure. The global rack sweep is "
-            "expected to disconnect the intended star-shaped body."
+            "Five-lobe 100:40 closure whose connected leftover body no "
+            "longer follows the requested centrode."
         ),
         expected_to_pass=False,
     ),
@@ -256,6 +260,8 @@ def main() -> int:
                 metadata["placed_pair_overlap_area"] <= 1e-6 * case.teeth
                 and metadata["maximum_transmission_error"] < 0.01
                 and metadata["minimum_root_radius"] > 0.0
+                and metadata["drive_centrode_outline_distance"]
+                <= metadata["centrode_fidelity_tolerance"]
             )
             record.update(
                 {
@@ -269,6 +275,12 @@ def main() -> int:
                         "maximum_transmission_error"
                     ],
                     "minimum_root_radius": metadata["minimum_root_radius"],
+                    "drive_centrode_outline_distance": metadata[
+                        "drive_centrode_outline_distance"
+                    ],
+                    "centrode_fidelity_tolerance": metadata[
+                        "centrode_fidelity_tolerance"
+                    ],
                     "cutter_sweep_phase_count": metadata["cutter_sweep_phase_count"],
                 }
             )
