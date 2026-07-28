@@ -115,10 +115,14 @@ pair = ncgears.generate_from_centrode(
 )
 ```
 
-Closed nonconvex involute inputs automatically use the direct analytic-form
-backend. It evaluates the straight-rack envelope equations without constructing
+All involute inputs use the direct analytic-form backend. It evaluates the
+straight-rack flank and rounded rack-tip envelope equations without constructing
 or sweeping a complete rack solid, so remote rack material cannot erase a
-pitch-curve concavity.
+pitch-curve concavity. Exact addendum and dedendum offsets complete each tooth.
+An independent non-working-profile rolling pass removes measured mate
+interference while refusing to alter material outside either pitch-side root
+region. Finite open profiles additionally permit relief in their padded end
+bands so the closing faces do not collide near the motion endpoints.
 
 ## Closed and open designs
 
@@ -144,15 +148,17 @@ pair = ncgears.generate(
 
 ## What is verified
 
-The Python engine uses analytic generalized-involute branches for closed
-nonconvex involute gears. Shapely/GEOS nodes and unions their tooth bodies with
-the non-working root blank. Convex, open, and legacy cycloidal-eased cases
+The Python engine uses analytic generalized-involute branches for every
+involute gear, including finite open profiles and nonconvex centrodes.
+Shapely/GEOS nodes the exact flank, rack-tip fillet, addendum, and dedendum
+curves and arranges complete tooth bodies. Only legacy cycloidal-eased cases
 continue to use sampled cutter sweeps. A successful result includes checks for:
 
 - simple, hub-connected gear bodies
 - sampled whole-cycle solid interference
 - contact motion recovered from the finished outlines
-- analytic envelope/tangency residuals or sweep resolution, as applicable
+- analytic envelope/tangency, intersection, join, and chord residuals
+- non-working root/end rolling clearance without interior flank modification
 - root radius, tip thickness, and centrode curvature
 - drive-outline fidelity to the requested centrode
 - sliding-velocity and undercut diagnostics
@@ -172,6 +178,12 @@ python -m pip install -e ".[dev]"
 python -m pytest
 ruff check ncgears tests
 python -m build
+```
+
+For magnified visual inspection of four representative roots on each gear:
+
+```bash
+python scripts/render_profile_zooms.py out/gear_pair
 ```
 
 The GitHub Actions workflow tests Python 3.10–3.13, builds a platform-independent

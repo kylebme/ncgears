@@ -154,8 +154,10 @@ CASES = [
         ),
         teeth=64,
         category="silhouette_inspired",
-        note="Expected rack self-occlusion from the mixed higher harmonics.",
-        expected_to_pass=False,
+        note=(
+            "Former rack-self-occlusion case; analytical flanks and local root "
+            "trimming must preserve the mixed-harmonic concavities."
+        ),
     ),
     StressCase(
         name="stress_limit_three_lobe_shoulder",

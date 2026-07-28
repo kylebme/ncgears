@@ -19,6 +19,20 @@ def _assert_verified_pair(pair: ncgears.GearPair) -> None:
         assert pair.metadata["analytic_flank_sample_count"] >= 128 * (
             pair.drive_teeth + pair.driven_teeth
         )
+        assert pair.metadata["nonworking_closure"] == (
+            "analytic_rack_tip_and_dedendum_envelopes"
+        )
+        assert pair.metadata["requested_fillet_applied_to_closure"] is True
+        assert pair.metadata["maximum_join_gap"] < (
+            2e-7 * pair.metadata["module"]
+        )
+        assert pair.metadata["maximum_intersection_residual"] < (
+            2e-7 * pair.metadata["module"]
+        )
+        assert pair.metadata["maximum_fillet_root_residual"] < (
+            1e-8 * pair.metadata["module"]
+        )
+        assert pair.metadata["rolling_nonworking_trim_phase_count"] >= 96
         assert pair.metadata["maximum_envelope_residual"] < 1e-9
         assert pair.metadata["maximum_envelope_tangency_residual"] < 1e-10
         assert pair.metadata["maximum_analytic_chord_error"] < (
@@ -54,6 +68,37 @@ def test_python_engine_generates_unequal_ratio_pair(tmp_path: Path) -> None:
     assert pair.driven_teeth == 6
     assert pair.ratio == pytest.approx(2.0)
     assert pair.center_distance == pytest.approx(9.0, abs=1e-8)
+    assert pair.metadata["generation_backend"] == "analytic_form"
+    assert pair.metadata["profile_family"] == "generalized_involute"
+
+
+def test_analytic_involute_retains_exact_circular_root_depth(
+    tmp_path: Path,
+) -> None:
+    pair = ncgears.generate(
+        "phi",
+        name="circular_fillet_reference",
+        teeth=20,
+        fillet_factor=0.35,
+        samples=1024,
+        samples_per_radian=20,
+        output_directory=tmp_path,
+    )
+
+    _assert_verified_pair(pair)
+    expected_root_radius = 0.5 * pair.center_distance - 1.2
+    drive_radius = np.linalg.norm(pair.drive_outline[:-1], axis=1)
+    driven_radius = np.linalg.norm(pair.driven_outline[:-1], axis=1)
+    assert np.min(drive_radius) == pytest.approx(
+        expected_root_radius, abs=3e-5
+    )
+    assert np.min(driven_radius) == pytest.approx(
+        expected_root_radius, abs=3e-5
+    )
+    assert pair.metadata["analytic_undercut_count"] == 0
+    assert pair.metadata["rolling_nonworking_removed_area"] == pytest.approx(
+        0.0
+    )
 
 
 def test_python_engine_solves_centrode_center_distance(tmp_path: Path) -> None:
@@ -70,6 +115,7 @@ def test_python_engine_solves_centrode_center_distance(tmp_path: Path) -> None:
     assert pair.metadata["input_mode"] == "drive_centrode"
     assert pair.metadata["centrode_reference_center_distance"] > 1.08
     assert pair.ratio == pytest.approx(1.0, abs=1e-8)
+    assert pair.metadata["generation_backend"] == "analytic_form"
 
 
 def test_python_engine_generates_open_segment(tmp_path: Path) -> None:
@@ -79,6 +125,7 @@ def test_python_engine_generates_open_segment(tmp_path: Path) -> None:
         teeth=12,
         open_=True,
         drive_end=2.4,
+        padding_pitches=2.5,
         samples=1024,
         samples_per_radian=20,
         output_directory=tmp_path,
@@ -86,10 +133,35 @@ def test_python_engine_generates_open_segment(tmp_path: Path) -> None:
 
     _assert_verified_pair(pair)
     assert pair.metadata["topology"] == "open"
+    assert pair.metadata["generation_backend"] == "analytic_form"
+    assert pair.metadata["profile_family"] == "generalized_involute"
     assert pair.ratio == pytest.approx(
         (1.8 * 2.4 + 0.03 * math.sin(2.4)) / 2.4,
         abs=1e-7,
     )
+
+
+def test_open_profile_rolls_end_closures_outside_working_span(
+    tmp_path: Path,
+) -> None:
+    pair = ncgears.generate(
+        "1.35*phi + 0.025*phi**2",
+        name="open_quadratic_end_relief",
+        teeth=16,
+        open_=True,
+        drive_end=3.2,
+        padding_pitches=8.0,
+        samples=1024,
+        samples_per_radian=20,
+        output_directory=tmp_path,
+    )
+
+    _assert_verified_pair(pair)
+    assert pair.metadata["rolling_nonworking_trim_scope"] == (
+        "pitch_side_roots_and_open_end_relief"
+    )
+    assert pair.metadata["rolling_nonworking_removed_area"] > 1.0
+    assert pair.metadata["placed_pair_overlap_area"] == pytest.approx(0.0)
 
 
 def test_cycloidal_mate_uses_conservative_sampled_envelope(
