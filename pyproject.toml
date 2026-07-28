@@ -34,9 +34,15 @@ dependencies = [
 
 [project.optional-dependencies]
 plot = ["matplotlib>=3.8", "pillow>=10"]
-test = ["pytest>=8"]
+test = ["pillow>=10", "pytest>=8"]
 build = ["build>=1.2"]
-dev = ["build>=1.2", "matplotlib>=3.8", "pytest>=8", "ruff>=0.9"]
+dev = [
+  "build>=1.2",
+  "matplotlib>=3.8",
+  "pillow>=10",
+  "pytest>=8",
+  "ruff>=0.9",
+]
 
 [project.scripts]
 ncgears = "ncgears.cli:main"
