@@ -7,12 +7,15 @@ import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import ezdxf
 import numpy as np
 from ezdxf import colors, units
 from numpy.typing import NDArray
+
+if TYPE_CHECKING:
+    from matplotlib.figure import Figure
 
 GearSelection = Literal["drive", "driven", "pair"]
 
@@ -103,6 +106,21 @@ class GearPair:
         )
         render_pair(self, destination)
         return destination.resolve()
+
+    def plot(self, *, show: bool = True) -> Figure:
+        """Create an interactive Matplotlib plot with a motion slider.
+
+        The usual Matplotlib toolbar supports zooming and panning. Set
+        ``show=False`` to customize or embed the returned Figure without
+        immediately opening a window.
+
+        Install the optional plotting dependency with ``pip install
+        ncgears[plot]``.
+        """
+
+        from .rendering import plot_pair
+
+        return plot_pair(self, show=show)
 
     def render_gif(
         self,

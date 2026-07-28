@@ -53,6 +53,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, default=Path("out"))
     parser.add_argument("--render", action="store_true")
     parser.add_argument(
+        "--plot",
+        action="store_true",
+        help="open an interactive Matplotlib plot with a motion slider",
+    )
+    parser.add_argument(
         "--gif",
         nargs="?",
         const=True,
@@ -84,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
         "samples_per_radian": args.samples_per_radian,
         "output_directory": args.output,
         "render": args.render,
+        "plot": args.plot,
     }
     try:
         if args.centrode:

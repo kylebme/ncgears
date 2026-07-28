@@ -21,7 +21,7 @@ Shapely/GEOS provides robust floating-point polygon operations.
 pip install ncgears
 ```
 
-PNG and animated GIF previews are optional:
+PNG, animated GIF, and interactive Matplotlib previews are optional:
 
 ```bash
 pip install "ncgears[plot]"
@@ -33,7 +33,7 @@ Most functionality is available in the CLI:
 
 ```bash
 ncgears "phi - 0.08*sin(2*phi)" --teeth 24 --module 1.5 \
-  --name two_lobe --dxf two_lobe.dxf --render --gif
+  --name two_lobe --dxf two_lobe.dxf --render --gif --plot
 
 ncgears "1 + 0.08*cos(2*phi)" --centrode --teeth 20 \
   --name centrode_two_lobe
@@ -78,6 +78,16 @@ pair.metadata                # complete verification report
 pair.directory               # CSV and JSON source files
 pair.render()                # pair.png; requires ncgears[plot]
 pair.render_gif()            # pair.gif; follows the generated motion law
+pair.plot()                  # interactive motion slider, zoom, and pan
+```
+
+Pass `plot=True` to `generate()` or `generate_from_centrode()` to open the
+interactive plot as soon as generation finishes. The returned Matplotlib
+figure can also be embedded or customized without opening a window:
+
+```python
+figure = pair.plot(show=False)
+figure.suptitle("My mechanism")
 ```
 
 The output directory defaults to `out/<name>/`. Each successful generation

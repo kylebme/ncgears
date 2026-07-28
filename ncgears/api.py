@@ -168,6 +168,7 @@ def _run_generator(
     generator: str | Path | None,
     extra_arguments: Sequence[str] = (),
     render: bool,
+    plot: bool,
 ) -> GearPair:
     if generator is not None:
         raise ValueError(
@@ -230,6 +231,8 @@ def _run_generator(
     )
     if render:
         pair.render()
+    if plot:
+        pair.plot()
     return pair
 
 
@@ -256,6 +259,7 @@ def generate_from_transmission(
     output_directory: str | Path = "out",
     generator: str | Path | None = None,
     render: bool = False,
+    plot: bool = False,
 ) -> GearPair:
     """Generate a conjugate pair from the motion law ``psi(phi)``.
 
@@ -386,6 +390,7 @@ def generate_from_transmission(
         output_root=output_root,
         generator=generator,
         render=render,
+        plot=plot,
     )
 
 
@@ -414,6 +419,7 @@ def generate_from_centrode(
     output_directory: str | Path = "out",
     generator: str | Path | None = None,
     render: bool = False,
+    plot: bool = False,
 ) -> GearPair:
     """Generate a conjugate pair from the drive pitch radius ``r(phi)``.
 
@@ -515,6 +521,7 @@ def generate_from_centrode(
         generator=generator,
         extra_arguments=extra_arguments,
         render=render,
+        plot=plot,
     )
 
 

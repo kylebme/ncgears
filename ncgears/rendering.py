@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
+    from matplotlib.figure import Figure
+
     from .result import GearPair
 
 
@@ -24,7 +26,7 @@ def _load_motion(pair: GearPair) -> tuple[float, float, Callable[[float], float]
     ):
         raise ValueError(
             "Open gear-pair metadata does not record its active interval; "
-            "regenerate the pair before rendering a GIF."
+            "regenerate the pair before plotting its motion."
         )
     transmission_path = pair.directory / "transmission.csv"
     centrode_path = pair.directory / "centrode.csv"
@@ -100,18 +102,132 @@ def _load_motion(pair: GearPair) -> tuple[float, float, Callable[[float], float]
         )
 
     raise ValueError(
-        "GIF rendering requires transmission.csv or centrode.csv in the "
+        "Motion plotting requires transmission.csv or centrode.csv in the "
         f"gear-pair directory: {pair.directory}"
     )
+
+
+def _plot_extents(pair: GearPair) -> tuple[float, float, float]:
+    """Return drive radius, driven radius, and a shared plotting margin."""
+
+    drive_radius = float(np.max(np.linalg.norm(pair.drive_outline, axis=1)))
+    driven_radius = float(np.max(np.linalg.norm(pair.driven_outline, axis=1)))
+    margin = 0.08 * max(
+        pair.center_distance + drive_radius + driven_radius,
+        1.0,
+    )
+    return drive_radius, driven_radius, margin
+
+
+def plot_pair(
+    pair: GearPair,
+    *,
+    show: bool = True,
+) -> Figure:
+    """Create an interactive gear-pair plot with a drive-angle slider.
+
+    The standard Matplotlib navigation toolbar remains available for zooming
+    and panning. Set ``show=False`` to embed or further customize the returned
+    figure before displaying it.
+    """
+
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Polygon
+        from matplotlib.transforms import Affine2D
+        from matplotlib.widgets import Slider
+    except ImportError as error:
+        raise ImportError(
+            "Interactive plotting requires Matplotlib. Install it with "
+            "`python -m pip install 'ncgears[plot]'`."
+        ) from error
+
+    active_start, active_end, driven_motion = _load_motion(pair)
+    drive_radius, driven_radius, margin = _plot_extents(pair)
+
+    figure, axis = plt.subplots(figsize=(10, 6))
+    figure.subplots_adjust(bottom=0.18)
+    drive_patch = Polygon(
+        pair.drive_outline,
+        closed=True,
+        facecolor="#8eb6d8",
+        edgecolor="#15324b",
+        linewidth=0.8,
+        alpha=0.88,
+    )
+    driven_patch = Polygon(
+        pair.driven_outline,
+        closed=True,
+        facecolor="#e4b07a",
+        edgecolor="#6b3718",
+        linewidth=0.8,
+        alpha=0.88,
+    )
+    axis.add_patch(drive_patch)
+    axis.add_patch(driven_patch)
+    axis.plot(
+        [0.0, pair.center_distance],
+        [0.0, 0.0],
+        linestyle=":",
+        marker="+",
+        color="#5f6770",
+        linewidth=0.8,
+    )
+    axis.set_xlim(
+        -drive_radius - margin,
+        pair.center_distance + driven_radius + margin,
+    )
+    vertical_radius = max(drive_radius, driven_radius)
+    axis.set_ylim(-vertical_radius - margin, vertical_radius + margin)
+    axis.set_aspect("equal", adjustable="box")
+    axis.grid(True, color="#d7dce2", linewidth=0.5)
+    axis.set_facecolor("#fafbfc")
+    axis.set_title(
+        f"{pair.metadata['name']}: "
+        f"{pair.drive_teeth}:{pair.driven_teeth} teeth"
+    )
+    axis.set_xlabel("millimetres")
+    axis.set_ylabel("millimetres")
+
+    slider_axis = figure.add_axes((0.16, 0.055, 0.68, 0.035))
+    angle_slider = Slider(
+        ax=slider_axis,
+        label="Drive angle φ (rad)",
+        valmin=active_start,
+        valmax=active_end,
+        valinit=active_start,
+    )
+
+    def update(phi: float) -> None:
+        drive_angle = float(phi - active_start)
+        driven_angle = -driven_motion(float(phi))
+        drive_patch.set_transform(
+            Affine2D().rotate(drive_angle) + axis.transData
+        )
+        driven_patch.set_transform(
+            Affine2D()
+            .rotate(driven_angle)
+            .translate(pair.center_distance, 0.0)
+            + axis.transData
+        )
+        figure.canvas.draw_idle()
+
+    angle_slider.on_changed(update)
+    update(active_start)
+
+    # Matplotlib's callback registry holds weak references. Retaining the
+    # Slider on the Figure keeps it responsive when callers only retain the
+    # returned Figure.
+    figure._ncgears_angle_slider = angle_slider
+    if show:
+        plt.show()
+    return figure
 
 
 def render_pair(pair: GearPair, output: str | Path) -> Path:
     """Render an assembled gear pair to a PNG or other Matplotlib format."""
 
     try:
-        import matplotlib
-
-        matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except ImportError as error:
         raise ImportError(
@@ -169,9 +285,6 @@ def render_pair_gif(
         raise ValueError("dpi must be positive")
 
     try:
-        import matplotlib
-
-        matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         from matplotlib.animation import FuncAnimation, PillowWriter
         from matplotlib.patches import Polygon
@@ -198,12 +311,7 @@ def render_pair_gif(
 
     drive = pair.drive_outline
     driven = pair.driven_outline
-    drive_radius = float(np.max(np.linalg.norm(drive, axis=1)))
-    driven_radius = float(np.max(np.linalg.norm(driven, axis=1)))
-    margin = 0.08 * max(
-        pair.center_distance + drive_radius + driven_radius,
-        1.0,
-    )
+    drive_radius, driven_radius, margin = _plot_extents(pair)
 
     figure, axis = plt.subplots(figsize=(9, 5.4), dpi=dpi)
     drive_patch = Polygon(

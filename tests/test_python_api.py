@@ -12,6 +12,7 @@ from ezdxf import units
 from ezdxf.addons.drawing import Frontend, RenderContext, recorder
 
 import ncgears
+from ncgears.cli import build_parser
 from ncgears.result import GearPair
 
 
@@ -146,6 +147,57 @@ def test_result_renders_animated_gif(tmp_path: Path) -> None:
         assert image.n_frames == 5
 
 
+def test_result_creates_interactive_motion_plot(tmp_path: Path) -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    pair = _fixture_pair(tmp_path / "fixture")
+    phi = np.linspace(0.0, 2.0 * math.pi, 32, endpoint=False)
+    np.savetxt(
+        pair.directory / "transmission.csv",
+        np.column_stack(
+            (
+                phi,
+                2.0 * phi,
+                np.full_like(phi, 2.0),
+                np.zeros_like(phi),
+                np.zeros_like(phi),
+            )
+        ),
+        delimiter=",",
+        header="phi,psi,psi1,psi2,psi3",
+        comments="",
+    )
+
+    figure = pair.plot(show=False)
+    slider = figure._ncgears_angle_slider
+    drive_patch, driven_patch = figure.axes[0].patches
+    initial_drive_transform = drive_patch.get_transform().get_matrix().copy()
+    initial_driven_transform = driven_patch.get_transform().get_matrix().copy()
+
+    slider.set_val(math.pi / 4.0)
+
+    assert len(figure.axes) == 2
+    assert slider.valmin == pytest.approx(0.0)
+    assert slider.valmax == pytest.approx(2.0 * math.pi)
+    assert not np.allclose(
+        drive_patch.get_transform().get_matrix(),
+        initial_drive_transform,
+    )
+    assert not np.allclose(
+        driven_patch.get_transform().get_matrix(),
+        initial_driven_transform,
+    )
+    plt.close(figure)
+
+
+def test_cli_accepts_interactive_plot_option() -> None:
+    args = build_parser().parse_args(["phi", "--plot"])
+
+    assert args.plot is True
+
+
 def test_transmission_frontend_samples_motion_law(tmp_path: Path) -> None:
     sentinel = object()
     with patch("ncgears.api._run_generator", return_value=sentinel) as run:
@@ -155,6 +207,7 @@ def test_transmission_frontend_samples_motion_law(tmp_path: Path) -> None:
             teeth=20,
             samples=1024,
             output_directory=tmp_path,
+            plot=True,
         )
 
     assert result is sentinel
@@ -167,6 +220,7 @@ def test_transmission_frontend_samples_motion_law(tmp_path: Path) -> None:
     assert np.min(table[:, 2]) > 0.0
     assert run.call_args.kwargs["cycle_delta"] == pytest.approx(2.0 * math.pi)
     assert run.call_args.kwargs["active_end"] == pytest.approx(2.0 * math.pi)
+    assert run.call_args.kwargs["plot"] is True
 
 
 def test_centrode_frontend_samples_radius_and_derivatives(tmp_path: Path) -> None:
