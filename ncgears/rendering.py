@@ -8,6 +8,15 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from ._policy import (
+    DEFAULT_GIF_DPI,
+    DEFAULT_GIF_FPS,
+    DEFAULT_GIF_FRAMES,
+    FLOAT_COMPARISON_ULPS,
+    MIN_GIF_FRAMES,
+    RENDER_MARGIN_FRACTION,
+)
+
 if TYPE_CHECKING:
     from .result import GearPair
 
@@ -19,9 +28,7 @@ def _load_motion(pair: GearPair) -> tuple[float, float, Callable[[float], float]
 
     metadata = pair.metadata
     closed = metadata.get("topology", "closed") == "closed"
-    if not closed and (
-        "active_start" not in metadata or "active_end" not in metadata
-    ):
+    if not closed and ("active_start" not in metadata or "active_end" not in metadata):
         raise ValueError(
             "Open gear-pair metadata does not record its active interval; "
             "regenerate the pair before rendering a GIF."
@@ -30,9 +37,7 @@ def _load_motion(pair: GearPair) -> tuple[float, float, Callable[[float], float]
     centrode_path = pair.directory / "centrode.csv"
 
     if transmission_path.exists():
-        samples = np.loadtxt(
-            transmission_path, delimiter=",", skiprows=1, ndmin=2
-        )
+        samples = np.loadtxt(transmission_path, delimiter=",", skiprows=1, ndmin=2)
         phi = samples[:, 0]
         psi = samples[:, 1]
         derivative = samples[:, 2]
@@ -54,7 +59,10 @@ def _load_motion(pair: GearPair) -> tuple[float, float, Callable[[float], float]
                 )
             )
             endpoint = domain_start + period
-            if phi[-1] < endpoint - 1e-10 * max(1.0, abs(period)):
+            tolerance = (
+                FLOAT_COMPARISON_ULPS * np.finfo(float).eps * max(1.0, abs(period))
+            )
+            if phi[-1] < endpoint - tolerance:
                 phi = np.append(phi, endpoint)
                 psi = np.append(psi, psi[0] + cycle_delta)
                 derivative = np.append(derivative, derivative[0])
@@ -78,13 +86,14 @@ def _load_motion(pair: GearPair) -> tuple[float, float, Callable[[float], float]
         )
         if closed:
             endpoint = domain_start + period
-            if phi[-1] < endpoint - 1e-10 * max(1.0, abs(period)):
+            tolerance = (
+                FLOAT_COMPARISON_ULPS * np.finfo(float).eps * max(1.0, abs(period))
+            )
+            if phi[-1] < endpoint - tolerance:
                 phi = np.append(phi, endpoint)
                 radius = np.append(radius, radius[0])
 
-        reference_distance = float(
-            metadata["centrode_reference_center_distance"]
-        )
+        reference_distance = float(metadata["centrode_reference_center_distance"])
         ratio = radius / (reference_distance - radius)
         ratio_spline = CubicSpline(
             phi,
@@ -153,16 +162,16 @@ def render_pair_gif(
     pair: GearPair,
     output: str | Path,
     *,
-    frames: int = 72,
-    fps: int = 24,
-    dpi: int = 100,
+    frames: int = DEFAULT_GIF_FRAMES,
+    fps: int = DEFAULT_GIF_FPS,
+    dpi: int = DEFAULT_GIF_DPI,
     show_axes: bool = True,
     show_title: bool = True,
 ) -> Path:
     """Render the generated gear pair moving through its active interval."""
 
-    if frames < 2:
-        raise ValueError("frames must be at least 2")
+    if frames < MIN_GIF_FRAMES:
+        raise ValueError(f"frames must be at least {MIN_GIF_FRAMES}")
     if fps <= 0:
         raise ValueError("fps must be positive")
     if dpi <= 0:
@@ -200,7 +209,7 @@ def render_pair_gif(
     driven = pair.driven_outline
     drive_radius = float(np.max(np.linalg.norm(drive, axis=1)))
     driven_radius = float(np.max(np.linalg.norm(driven, axis=1)))
-    margin = 0.08 * max(
+    margin = RENDER_MARGIN_FRACTION * max(
         pair.center_distance + drive_radius + driven_radius,
         1.0,
     )
@@ -245,8 +254,7 @@ def render_pair_gif(
         axis.set_axis_off()
     if show_title:
         axis.set_title(
-            f"{pair.metadata['name']}: "
-            f"{pair.drive_teeth}:{pair.driven_teeth} teeth"
+            f"{pair.metadata['name']}: {pair.drive_teeth}:{pair.driven_teeth} teeth"
         )
     if show_axes or show_title:
         figure.tight_layout()
@@ -258,9 +266,7 @@ def render_pair_gif(
         driven_angle = -driven_motion(float(phi))
         drive_patch.set_transform(Affine2D().rotate(drive_angle) + axis.transData)
         driven_patch.set_transform(
-            Affine2D()
-            .rotate(driven_angle)
-            .translate(pair.center_distance, 0.0)
+            Affine2D().rotate(driven_angle).translate(pair.center_distance, 0.0)
             + axis.transData
         )
         return drive_patch, driven_patch

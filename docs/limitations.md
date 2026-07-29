@@ -103,13 +103,16 @@ GEOS uses robust predicates but does not retain an exact rational construction
 for every new vertex. In this algorithm, comparisons against the former CGAL
 implementation show Boolean differences far below cutter-pose discretization
 at normal gear scales. Very large coordinate offsets, modules close to machine
-precision, or extremely thin remnants remain unsuitable inputs.
+precision, or extremely thin remnants remain unsuitable inputs. Geometry
+tolerances are expressed as documented factors of module in
+`ncgears/_policy.py`; they do not have a hidden unit-sized floor.
 
-The finished polygons are checked at at least four phases per tooth over the
-whole requested cycle. Several off-grid phases additionally recover the first
-solid-contact angle on both sides of the requested output angle. This catches
-phase errors that a construction-only check would miss, but it is not a formal
-interval-arithmetic proof over every real-valued phase.
+The finished polygons are checked on four staggered grids, each with at least
+four phases per tooth over the whole requested cycle. Several off-grid phases
+additionally recover the first solid-contact angle on both sides of the
+requested output angle. Metadata identifies this as a staggered sampled check.
+It catches phase errors that a construction-only check would miss, but it is
+not a formal interval-arithmetic proof over every real-valued phase.
 
 Increase `--samples-per-radian` when:
 

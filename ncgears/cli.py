@@ -6,6 +6,15 @@ import argparse
 import math
 from pathlib import Path
 
+from ._policy import (
+    DEFAULT_GIF_FPS,
+    DEFAULT_GIF_FRAMES,
+    DEFAULT_INPUT_SAMPLES,
+    DEFAULT_MODULE,
+    DEFAULT_PRESSURE_ANGLE_DEG,
+    DEFAULT_SAMPLES_PER_RADIAN,
+    DEFAULT_TEETH,
+)
 from .api import generate_from_centrode, generate_from_transmission
 from .errors import ncgearsError
 
@@ -25,9 +34,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="interpret the expression as the drive pitch radius r(phi)",
     )
     parser.add_argument("--name", default="gear_pair")
-    parser.add_argument("--teeth", type=int, default=16)
-    parser.add_argument("--module", type=float, default=1.0)
-    parser.add_argument("--pressure-angle", type=float, default=20.0)
+    parser.add_argument("--teeth", type=int, default=DEFAULT_TEETH)
+    parser.add_argument("--module", type=float, default=DEFAULT_MODULE)
+    parser.add_argument(
+        "--pressure-angle", type=float, default=DEFAULT_PRESSURE_ANGLE_DEG
+    )
     parser.add_argument("--open", action="store_true", dest="open_")
     parser.add_argument("--drive-start", type=float, default=0.0)
     parser.add_argument("--drive-end", type=float, default=2.0 * math.pi)
@@ -48,8 +59,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=2.0 * math.pi,
         help="target mate advance for a centrode with solved center distance",
     )
-    parser.add_argument("--samples", type=int, default=8192)
-    parser.add_argument("--samples-per-radian", type=int, default=110)
+    parser.add_argument("--samples", type=int, default=DEFAULT_INPUT_SAMPLES)
+    parser.add_argument(
+        "--samples-per-radian", type=int, default=DEFAULT_SAMPLES_PER_RADIAN
+    )
     parser.add_argument("--output", type=Path, default=Path("out"))
     parser.add_argument("--render", action="store_true")
     parser.add_argument(
@@ -60,8 +73,8 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="render an animated GIF, optionally to PATH",
     )
-    parser.add_argument("--gif-frames", type=int, default=72)
-    parser.add_argument("--gif-fps", type=int, default=24)
+    parser.add_argument("--gif-frames", type=int, default=DEFAULT_GIF_FRAMES)
+    parser.add_argument("--gif-fps", type=int, default=DEFAULT_GIF_FPS)
     parser.add_argument("--svg", type=Path, help="also export an assembled SVG")
     parser.add_argument("--dxf", type=Path, help="also export an assembled DXF")
     return parser
