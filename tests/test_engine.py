@@ -224,8 +224,8 @@ def test_analytic_involute_retains_exact_circular_root_depth(
 def test_python_engine_solves_centrode_center_distance(tmp_path: Path) -> None:
     pair = ncgears.generate_from_centrode(
         "1 + 0.08*cos(2*phi)",
-        name="centrode",
-        teeth=12,
+        name="centrode_two_lobe",
+        teeth=20,
         samples=1024,
         samples_per_radian=20,
         output_directory=tmp_path,

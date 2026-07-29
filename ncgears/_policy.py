@@ -85,11 +85,13 @@ ANGLE_CLOSURE_TOLERANCE = 1e-8
 
 # Analytic curve intersection and cusp discovery. Search windows are measured
 # in circular pitch; sample counts are derived from span instead of being tied
-# to one particular window width.
+# to one particular window width. The 513-point floor preserves the resolution
+# required by short, tightly looping undercut branches; span-derived density
+# increases it for longer windows.
 INTERSECTION_FLANK_HALF_WINDOW_PITCHES = 1.25
 INTERSECTION_OFFSET_HALF_WINDOW_PITCHES = 1.75
 INTERSECTION_SAMPLES_PER_PITCH = 128
-INTERSECTION_MIN_SAMPLES = 129
+INTERSECTION_MIN_SAMPLES = 513
 INTERSECTION_RESIDUAL_FACTOR = GEOMETRY_LENGTH_TOLERANCE_FACTOR
 INTERSECTION_PARAMETER_DEDUP_FACTOR = 1e-6
 INTERSECTION_SOLVER_TOLERANCE = 1e-13
