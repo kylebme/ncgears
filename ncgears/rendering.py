@@ -122,6 +122,7 @@ def render_pair(pair: GearPair, output: str | Path) -> Path:
 
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
+        from matplotlib.patches import Polygon
     except ImportError as error:
         raise ImportError(
             "Rendering requires Matplotlib. Install it with "
@@ -134,10 +135,31 @@ def render_pair(pair: GearPair, output: str | Path) -> Path:
     driven = pair.placed_driven_outline
 
     figure, axis = plt.subplots(figsize=(10, 6), dpi=180)
-    axis.fill(drive[:, 0], drive[:, 1], color="#8eb6d8", alpha=0.82)
-    axis.plot(drive[:, 0], drive[:, 1], color="#15324b", linewidth=0.7)
-    axis.fill(driven[:, 0], driven[:, 1], color="#e4b07a", alpha=0.82)
-    axis.plot(driven[:, 0], driven[:, 1], color="#6b3718", linewidth=0.7)
+    drive_patch = Polygon(
+        drive,
+        closed=True,
+        facecolor=matplotlib.colors.to_rgba("#8eb6d8", 0.82),
+        edgecolor="#15324b",
+        linewidth=0.7,
+    )
+    driven_patch = Polygon(
+        driven,
+        closed=True,
+        facecolor=matplotlib.colors.to_rgba("#e4b07a", 0.82),
+        edgecolor="#6b3718",
+        linewidth=0.7,
+    )
+    # Limits are known from the input arrays. add_artist avoids Matplotlib
+    # traversing every outline vertex merely to rediscover those bounds.
+    axis.add_artist(drive_patch)
+    axis.add_artist(driven_patch)
+    all_points = np.vstack((drive, driven))
+    minimum = np.min(all_points, axis=0)
+    maximum = np.max(all_points, axis=0)
+    span = maximum - minimum
+    margin = 0.05 * np.maximum(span, np.finfo(float).eps)
+    axis.set_xlim(minimum[0] - margin[0], maximum[0] + margin[0])
+    axis.set_ylim(minimum[1] - margin[1], maximum[1] + margin[1])
     axis.plot(
         [0.0, pair.center_distance],
         [0.0, 0.0],
@@ -182,9 +204,9 @@ def render_pair_gif(
 
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-        from matplotlib.animation import FuncAnimation, PillowWriter
         from matplotlib.patches import Polygon
         from matplotlib.transforms import Affine2D
+        from PIL import Image
     except ImportError as error:
         raise ImportError(
             "GIF rendering requires Matplotlib and Pillow. Install them with "
@@ -231,8 +253,10 @@ def render_pair_gif(
         linewidth=0.8,
         alpha=0.88,
     )
-    axis.add_patch(drive_patch)
-    axis.add_patch(driven_patch)
+    # The limits are set explicitly below, so avoid the O(vertices) automatic
+    # data-limit scan performed by add_patch.
+    axis.add_artist(drive_patch)
+    axis.add_artist(driven_patch)
     axis.plot(
         [0.0, pair.center_distance],
         [0.0, 0.0],
@@ -271,15 +295,31 @@ def render_pair_gif(
         )
         return drive_patch, driven_patch
 
-    animation = FuncAnimation(
-        figure,
-        update,
-        frames=phases,
-        interval=1000.0 / fps,
-        blit=True,
-    )
     try:
-        animation.save(destination, writer=PillowWriter(fps=fps), dpi=dpi)
+        rendered_frames: list[Image.Image] = []
+        for phase in phases:
+            update(float(phase))
+            figure.canvas.draw()
+            size = figure.canvas.get_width_height()
+            frame = Image.frombuffer(
+                "RGBA",
+                size,
+                figure.canvas.buffer_rgba(),
+                "raw",
+                "RGBA",
+                0,
+                1,
+            )
+            # The canvas is reused for the next pose. Conversion both improves
+            # GIF palette selection and gives this frame independent storage.
+            rendered_frames.append(frame.convert("RGB"))
+        rendered_frames[0].save(
+            destination,
+            save_all=True,
+            append_images=rendered_frames[1:],
+            duration=int(1000 / fps),
+            loop=0,
+        )
     finally:
         plt.close(figure)
     return destination.resolve()

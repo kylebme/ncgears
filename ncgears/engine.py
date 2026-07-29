@@ -18,6 +18,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.integrate import cumulative_simpson, simpson
 from scipy.optimize import brentq, least_squares, minimize_scalar
+from scipy.spatial import cKDTree
 from shapely import Geometry, affinity, make_valid, union_all
 from shapely.geometry import LineString, MultiPolygon, Point, Polygon
 from shapely.ops import nearest_points
@@ -456,35 +457,39 @@ def _outline(polygon: Polygon, tolerance: float) -> FloatArray:
         raise RuntimeError("Geometry operation left fewer than three boundary points")
 
     # GEOS can retain nearly coincident and almost-collinear overlay vertices.
-    unique = [points[0]]
-    for point in points[1:-1]:
-        if (
-            np.linalg.norm(point - unique[-1])
-            > tolerance * OUTLINE_DUPLICATE_TOLERANCE_FRACTION
-        ):
-            unique.append(point)
-    points = np.asarray(unique, dtype=float)
+    points = points[:-1]
+    duplicate_tolerance = tolerance * OUTLINE_DUPLICATE_TOLERANCE_FRACTION
+    if np.any(np.linalg.norm(np.diff(points, axis=0), axis=1) <= duplicate_tolerance):
+        # The usual path has no adjacent duplicates. Retain the sequential
+        # filter for the uncommon case because a run of close points must be
+        # compared with the last point that survived, not merely its neighbor.
+        unique = [points[0]]
+        for point in points[1:]:
+            if np.linalg.norm(point - unique[-1]) > duplicate_tolerance:
+                unique.append(point)
+        points = np.asarray(unique, dtype=float)
 
     changed = True
     while changed and len(points) > MIN_POLYGON_VERTEX_COUNT:
-        changed = False
-        keep = np.ones(len(points), dtype=bool)
-        for index in range(len(points)):
-            previous = points[(index - 1) % len(points)]
-            current = points[index]
-            following = points[(index + 1) % len(points)]
-            a = current - previous
-            b = following - current
-            lengths = np.linalg.norm(a) + np.linalg.norm(b)
-            twice_area = abs(float(a[0] * b[1] - a[1] * b[0]))
-            if (
-                float(np.dot(a, b)) >= 0.0
-                and lengths > 0.0
-                and twice_area / lengths
-                < tolerance * OUTLINE_COLLINEAR_TOLERANCE_FRACTION
-            ):
-                keep[index] = False
-                changed = True
+        previous = np.roll(points, 1, axis=0)
+        following = np.roll(points, -1, axis=0)
+        incoming = points - previous
+        outgoing = following - points
+        lengths = np.linalg.norm(incoming, axis=1) + np.linalg.norm(outgoing, axis=1)
+        twice_area = np.abs(
+            incoming[:, 0] * outgoing[:, 1] - incoming[:, 1] * outgoing[:, 0]
+        )
+        forward = np.einsum("ij,ij->i", incoming, outgoing) >= 0.0
+        removable = (
+            forward
+            & (lengths > 0.0)
+            & (
+                twice_area
+                < tolerance * OUTLINE_COLLINEAR_TOLERANCE_FRACTION * lengths
+            )
+        )
+        changed = bool(np.any(removable))
+        keep = ~removable
         points = points[keep]
     if len(points) < MIN_POLYGON_VERTEX_COUNT:
         raise RuntimeError("Geometry cleanup removed the complete boundary")
@@ -495,14 +500,19 @@ def _outline(polygon: Polygon, tolerance: float) -> FloatArray:
 
 
 def _transform_outline(
-    points: FloatArray, angle: float, translate_x: float = 0.0
+    points: FloatArray,
+    angle: float,
+    translate_x: float = 0.0,
+    translate_y: float = 0.0,
 ) -> Polygon:
     vertices = points[:-1]
     cosine = math.cos(angle)
     sine = math.sin(angle)
     transformed = np.empty_like(vertices)
     transformed[:, 0] = cosine * vertices[:, 0] - sine * vertices[:, 1] + translate_x
-    transformed[:, 1] = sine * vertices[:, 0] + cosine * vertices[:, 1]
+    transformed[:, 1] = (
+        sine * vertices[:, 0] + cosine * vertices[:, 1] + translate_y
+    )
     return Polygon(transformed)
 
 
@@ -1283,36 +1293,34 @@ class _GearGenerator:
             rack_coordinate = sign * 0.25 * pitch - (samples - phase_arc)
             values = rack_coordinate * curvature - sign * math.tan(self.alpha)
             candidates: list[float] = []
-            for index in range(sample_count):
-                lhs = float(values[index])
-                rhs = float(values[index + 1])
-                if not (math.isfinite(lhs) and math.isfinite(rhs)):
-                    continue
-                if abs(lhs) <= CUSP_EQUATION_TOLERANCE:
-                    candidates.append(float(samples[index]))
-                elif lhs * rhs < 0.0:
-                    candidates.append(
-                        float(
-                            brentq(
-                                equation,
-                                float(samples[index]),
-                                float(samples[index + 1]),
-                                xtol=solver_parameter_tolerance,
-                                rtol=INTERSECTION_SOLVER_TOLERANCE,
-                            )
+            finite = np.isfinite(values)
+            lhs = values[:-1]
+            rhs = values[1:]
+            exact_root = finite[:-1] & (np.abs(lhs) <= CUSP_EQUATION_TOLERANCE)
+            candidates.extend(float(value) for value in samples[:-1][exact_root])
+            sign_change = finite[:-1] & finite[1:] & ~exact_root & (lhs * rhs < 0.0)
+            for index in np.flatnonzero(sign_change):
+                candidates.append(
+                    float(
+                        brentq(
+                            equation,
+                            float(samples[index]),
+                            float(samples[index + 1]),
+                            xtol=solver_parameter_tolerance,
+                            rtol=INTERSECTION_SOLVER_TOLERANCE,
                         )
                     )
+                )
 
             # A tangent/double root does not change sign. Minimize |f| around
             # every sampled local minimum so such a cusp is still discoverable.
             magnitudes = np.abs(values)
-            for index in range(1, sample_count):
-                if not (
-                    math.isfinite(float(magnitudes[index]))
-                    and magnitudes[index] <= magnitudes[index - 1]
-                    and magnitudes[index] <= magnitudes[index + 1]
-                ):
-                    continue
+            local_minimum = (
+                finite[1:-1]
+                & (magnitudes[1:-1] <= magnitudes[:-2])
+                & (magnitudes[1:-1] <= magnitudes[2:])
+            )
+            for index in np.flatnonzero(local_minimum) + 1:
                 minimum = minimize_scalar(
                     lambda value: abs(equation(float(value))),
                     bounds=(
@@ -1325,10 +1333,7 @@ class _GearGenerator:
                 if minimum.success and float(minimum.fun) <= CUSP_EQUATION_TOLERANCE:
                     candidates.append(float(minimum.x))
 
-            if (
-                math.isfinite(float(values[-1]))
-                and abs(float(values[-1])) <= CUSP_EQUATION_TOLERANCE
-            ):
+            if finite[-1] and abs(float(values[-1])) <= CUSP_EQUATION_TOLERANCE:
                 candidates.append(float(samples[-1]))
             candidates.sort()
             roots = []
@@ -2175,21 +2180,38 @@ class _GearGenerator:
 
     @staticmethod
     def _place_geometry(
-        geometry: Geometry, angle: float, translate_x: float = 0.0
+        geometry: Geometry,
+        angle: float,
+        translate_x: float = 0.0,
+        translate_y: float = 0.0,
     ) -> Geometry:
-        placed = affinity.rotate(geometry, angle, origin=(0.0, 0.0), use_radians=True)
-        if translate_x:
-            placed = affinity.translate(placed, xoff=translate_x)
-        return placed
+        cosine = math.cos(angle)
+        sine = math.sin(angle)
+        return affinity.affine_transform(
+            geometry,
+            [cosine, -sine, sine, cosine, translate_x, translate_y],
+        )
 
     @staticmethod
     def _unplace_geometry(
-        geometry: Geometry, angle: float, translate_x: float = 0.0
+        geometry: Geometry,
+        angle: float,
+        translate_x: float = 0.0,
+        translate_y: float = 0.0,
     ) -> Geometry:
-        local = (
-            affinity.translate(geometry, xoff=-translate_x) if translate_x else geometry
+        cosine = math.cos(angle)
+        sine = math.sin(angle)
+        return affinity.affine_transform(
+            geometry,
+            [
+                cosine,
+                sine,
+                -sine,
+                cosine,
+                -cosine * translate_x - sine * translate_y,
+                sine * translate_x - cosine * translate_y,
+            ],
         )
-        return affinity.rotate(local, -angle, origin=(0.0, 0.0), use_radians=True)
 
     def _analytic_pitch_material(self, driven: bool) -> Polygon:
         """Return material inward of the pitch curve for root-only trimming."""
@@ -2298,21 +2320,29 @@ class _GearGenerator:
                 )
                 drive_angle = phi - self.active_start
                 driven_angle = -(float(self._psi(phi)) - psi_start)
-                placed_drive = self._place_geometry(current_drive, drive_angle)
+                relative_angle = driven_angle - drive_angle
+                center_x = self.center_distance * math.cos(drive_angle)
+                center_y = -self.center_distance * math.sin(drive_angle)
+                # Evaluate the pose in the drive gear's local frame. Rigid
+                # transforms preserve overlap area, and this leaves the larger
+                # drive body stationary instead of copying it every phase.
+                placed_drive = current_drive
                 placed_driven = self._place_geometry(
                     current_driven,
-                    driven_angle,
-                    self.center_distance,
+                    relative_angle,
+                    center_x,
+                    center_y,
                 )
                 overlap = placed_drive.intersection(placed_driven)
                 area = float(overlap.area)
                 if area <= overlap_tolerance:
                     return area, None, None, 0.0
-                placed_drive_root = self._place_geometry(drive_root_zone, drive_angle)
+                placed_drive_root = drive_root_zone
                 placed_driven_root = self._place_geometry(
                     driven_root_zone,
-                    driven_angle,
-                    self.center_distance,
+                    relative_angle,
+                    center_x,
+                    center_y,
                 )
                 drive_root_overlap = overlap.intersection(placed_drive_root)
                 driven_root_overlap = overlap.intersection(placed_driven_root)
@@ -2324,16 +2354,13 @@ class _GearGenerator:
                 uncovered_area = float(overlap.difference(covered).area)
                 drive_overlap = drive_root_overlap
                 driven_overlap = driven_root_overlap
-                local_drive_cut = (
-                    self._unplace_geometry(drive_overlap, drive_angle)
-                    if not drive_overlap.is_empty
-                    else None
-                )
+                local_drive_cut = drive_overlap if not drive_overlap.is_empty else None
                 local_driven_cut = (
                     self._unplace_geometry(
                         driven_overlap,
-                        driven_angle,
-                        self.center_distance,
+                        relative_angle,
+                        center_x,
+                        center_y,
                     )
                     if not driven_overlap.is_empty
                     else None
@@ -2422,24 +2449,20 @@ class _GearGenerator:
             total_removed_area,
         )
 
-    def _overlap(
-        self,
-        drive: FloatArray,
-        driven: FloatArray,
-        drive_angle: float,
-        driven_angle: float,
-    ) -> float:
-        placed_drive = _transform_outline(drive, drive_angle)
-        placed_driven = _transform_outline(driven, driven_angle, self.center_distance)
-        return float(placed_drive.intersection(placed_driven).area)
-
+    @staticmethod
     def _overlap_with_placed_drive(
-        self,
         placed_drive: Polygon,
         driven: FloatArray,
         driven_angle: float,
+        center_x: float,
+        center_y: float,
     ) -> float:
-        placed_driven = _transform_outline(driven, driven_angle, self.center_distance)
+        placed_driven = _transform_outline(
+            driven,
+            driven_angle,
+            center_x,
+            center_y,
+        )
         return float(placed_drive.intersection(placed_driven).area)
 
     def _verify_pair(
@@ -2468,16 +2491,20 @@ class _GearGenerator:
         ]
         fractions = np.unique(np.concatenate(fraction_grids))
         psi_start = float(self._psi(self.active_start))
+        placed_drive = Polygon(drive[:-1])
 
         def phase_overlap(fraction: float) -> float:
             phi = self.active_start + (self.active_end - self.active_start) * float(
                 fraction
             )
-            return self._overlap(
-                drive,
+            drive_angle = phi - self.active_start
+            driven_angle = -(float(self._psi(phi)) - psi_start)
+            return self._overlap_with_placed_drive(
+                placed_drive,
                 driven,
-                phi - self.active_start,
-                -(float(self._psi(phi)) - psi_start),
+                driven_angle - drive_angle,
+                self.center_distance * math.cos(drive_angle),
+                -self.center_distance * math.sin(drive_angle),
             )
 
         with ThreadPoolExecutor(
@@ -2504,9 +2531,17 @@ class _GearGenerator:
             phi = self.active_start + (self.active_end - self.active_start) * fraction
             drive_angle = phi - self.active_start
             desired = -(float(self._psi(phi)) - psi_start)
-            placed_drive = _transform_outline(drive, drive_angle)
+            relative_desired = desired - drive_angle
+            center_x = self.center_distance * math.cos(drive_angle)
+            center_y = -self.center_distance * math.sin(drive_angle)
             if (
-                self._overlap_with_placed_drive(placed_drive, driven, desired)
+                self._overlap_with_placed_drive(
+                    placed_drive,
+                    driven,
+                    relative_desired,
+                    center_x,
+                    center_y,
+                )
                 > contact_area_tolerance
             ):
                 return 0.0
@@ -2520,7 +2555,9 @@ class _GearGenerator:
                         self._overlap_with_placed_drive(
                             placed_drive,
                             driven,
-                            desired + direction * collision,
+                            relative_desired + direction * collision,
+                            center_x,
+                            center_y,
                         )
                         > contact_area_tolerance
                     ):
@@ -2534,7 +2571,9 @@ class _GearGenerator:
                         self._overlap_with_placed_drive(
                             placed_drive,
                             driven,
-                            desired + direction * collision,
+                            relative_desired + direction * collision,
+                            center_x,
+                            center_y,
                         )
                         > contact_area_tolerance
                     )
@@ -2546,7 +2585,9 @@ class _GearGenerator:
                         self._overlap_with_placed_drive(
                             placed_drive,
                             driven,
-                            desired + direction * midpoint,
+                            relative_desired + direction * midpoint,
+                            center_x,
+                            center_y,
                         )
                         > contact_area_tolerance
                     ):
@@ -2583,7 +2624,37 @@ class _GearGenerator:
         )
         radius = np.asarray(self._drive_radius(phi), dtype=float)
         centrode = radius * np.exp(-1j * phi)
-        centrode_line = LineString(np.column_stack((centrode.real, centrode.imag)))
+        centrode_points = np.column_stack((centrode.real, centrode.imag))
+
+        # GEOS' default Hausdorff metric is discrete: it measures every vertex
+        # against the other complete LineString. Nearest-vertex distances form
+        # a conservative upper bound for that metric and spatial trees compute
+        # it in O(n log n), instead of the quadratic LineString comparison.
+        # Fall back to the exact metric only near the acceptance threshold, so
+        # this faster check can never admit a profile the old check rejected.
+        outline_tree = cKDTree(drive)
+        centrode_tree = cKDTree(centrode_points)
+        centrode_to_outline = outline_tree.query(
+            centrode_points,
+            k=1,
+            workers=_MAX_GEOMETRY_WORKERS,
+        )[0]
+        outline_to_centrode = centrode_tree.query(
+            drive,
+            k=1,
+            workers=_MAX_GEOMETRY_WORKERS,
+        )[0]
+        distance_bound = float(
+            max(np.max(centrode_to_outline), np.max(outline_to_centrode))
+        )
+        fidelity_tolerance = (
+            max(self.addendum, self.dedendum)
+            + self.fillet_radius
+            + CENTRODE_FIDELITY_ALLOWANCE_MODULES * self.config.module
+        )
+        if distance_bound <= fidelity_tolerance:
+            return distance_bound
+        centrode_line = LineString(centrode_points)
         return float(centrode_line.hausdorff_distance(LineString(drive)))
 
     def generate(self, samples_per_radian: int) -> EngineResult:
@@ -2591,8 +2662,22 @@ class _GearGenerator:
             raise ValueError(
                 f"samples_per_radian must be at least {MIN_SAMPLES_PER_RADIAN}"
             )
-        drive_result = self._generate_analytic_involute_gear(False, samples_per_radian)
-        driven_result = self._generate_analytic_involute_gear(True, samples_per_radian)
+        if _MAX_GEOMETRY_WORKERS > 1:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                drive_result, driven_result = executor.map(
+                    lambda driven: self._generate_analytic_involute_gear(
+                        driven,
+                        samples_per_radian,
+                    ),
+                    (False, True),
+                )
+        else:
+            drive_result = self._generate_analytic_involute_gear(
+                False, samples_per_radian
+            )
+            driven_result = self._generate_analytic_involute_gear(
+                True, samples_per_radian
+            )
         drive = drive_result.outline
         driven = driven_result.outline
         analytic_curve_sample_count = (
