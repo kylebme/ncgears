@@ -6,8 +6,7 @@ pitch-curve shape.
 The generator creates 2D outlines, verifies the assembled pair for interference
 and contact-motion error, and exports CSV, SVG, DXF, JSON, PNG, and animated GIF
 files. It supports closed gears, finite open segments, deep nonconvex pitch
-curves, unequal ratios, generalized-involute teeth, and the legacy
-cycloidal-eased rack family.
+curves, unequal ratios, and generalized-involute teeth.
 The complete application and geometry pipeline are implemented in Python;
 Shapely/GEOS provides robust floating-point polygon operations.
 
@@ -110,18 +109,17 @@ pair = ncgears.generate_from_centrode(
     "1 + 0.08*cos(5*phi)",
     teeth=100,
     target_cycle_delta=5 * math.pi,
-    profile="involute",
     name="five_to_two",
 )
 ```
 
-All involute inputs use the direct analytic-form backend. It evaluates the
+Every input uses the hybrid analytical involute engine. It evaluates the
 straight-rack flank and rounded rack-tip envelope equations without constructing
 or sweeping a complete rack solid, so remote rack material cannot erase a
 pitch-curve concavity. Exact addendum and dedendum offsets complete each tooth.
-An independent non-working-profile rolling pass removes measured mate
-interference while refusing to alter material outside either pitch-side root
-region. Finite open profiles clip each analytical curve in rolling-arc
+An independent rolling pass removes measured non-working root interference
+while refusing to alter material outside either pitch-side root region. Finite
+open profiles clip each analytical curve in rolling-arc
 parameter space, then follow one quarter of the centrode back across the inner
 boundary. Source-domain padding is used only to solve endpoint teeth; it cannot
 change or clip the finished body.
@@ -150,13 +148,12 @@ pair = ncgears.generate(
 
 ## What is verified
 
-The Python engine uses analytic generalized-involute branches for every
-involute gear, including finite open profiles and nonconvex centrodes.
+The Python engine uses analytic generalized-involute branches for every gear,
+including finite open profiles and nonconvex centrodes.
 Shapely/GEOS nodes the exact flank, rack-tip fillet, addendum, and dedendum
 curves and arranges complete tooth bodies. Open bodies use an ordered,
 parameter-clipped analytical boundary rather than a radial sector
-intersection. Only legacy cycloidal-eased cases continue to use sampled cutter
-sweeps. A successful result includes checks for:
+intersection. A successful result includes checks for:
 
 - simple, hub-connected gear bodies
 - sampled whole-cycle solid interference
@@ -167,11 +164,11 @@ sweeps. A successful result includes checks for:
 - drive-outline fidelity to the requested centrode
 - sliding-velocity and undercut diagnostics
 
-`metadata.json` distinguishes `generation_backend: "analytic_form"` from
-`"sampled_cutter_sweep"`. Analytic results report flank sample count, maximum
-envelope residual, maximum envelope-tangency residual, and chord error.
-Sweep-based results report cutter-pose count and maximum sweep step. Pair
-verification uses a bounded thread pool of at most eight workers.
+`metadata.json` reports
+`generation_backend: "hybrid_analytic_involute"`, flank sample count, maximum
+envelope residual, maximum envelope-tangency residual, chord error, and rolling
+root-trim diagnostics. Pair verification uses a bounded thread pool of at most
+eight workers.
 
 These geometry checks are not load-rating or manufacturing certification.
 
@@ -199,10 +196,9 @@ runtime through its own platform wheels.
 The pitch-curve equations follow Uwe Bäsel,
 ["Determining the geometry of noncircular gears for given transmission
 function"](https://arxiv.org/abs/1905.02642). Tooth geometry is constructed by
-evaluating its analytic straight-rack envelope for nonconvex centrodes and by
-sweeping a parameterized rack cutter for the legacy backends. GEOS performs
-curve arrangement and solid regularization rather than project-specific
-intersection code. The silhouette-fitting problem addressed by Xu et al.,
+evaluating its analytic straight-rack envelope. GEOS performs curve arrangement
+and solid regularization rather than project-specific intersection code. The
+silhouette-fitting problem addressed by Xu et al.,
 ["Computational Design and Optimization of Non-Circular
 Gears"](https://doi.org/10.1111/cgf.13939), is complementary: a fitted
 transmission derivative or polar centrode can be passed into ncgears.

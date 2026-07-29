@@ -2,8 +2,7 @@
 
 Generalized involute flanks and rounded rack-tip fillets are evaluated from
 their analytical envelopes. Shapely/GEOS supplies curve arrangement and
-non-working-profile rolling interference removal. Legacy cycloidal profiles
-retain the sampled cutter-envelope implementation.
+non-working-profile rolling interference removal.
 """
 
 from __future__ import annotations
@@ -32,7 +31,6 @@ from ._policy import (
     ANALYTIC_REGULAR_DERIVATIVE_TOLERANCE,
     ANALYTIC_TANGENCY_RESIDUAL_TOLERANCE,
     ANGLE_CLOSURE_TOLERANCE,
-    BUFFER_QUADRANT_SEGMENTS,
     CENTRODE_ANALYSIS_INTERVALS_PER_INPUT_SEGMENT,
     CENTRODE_CONVEXITY_CURVATURE_FACTOR,
     CENTRODE_FIDELITY_ALLOWANCE_MODULES,
@@ -49,10 +47,6 @@ from ._policy import (
     CUSP_INITIAL_SAMPLES,
     CUSP_MAX_SAMPLES,
     CUSP_PARAMETER_DEDUP_FACTOR,
-    CUTTER_BUFFER_QUADRANT_SEGMENTS,
-    CUTTER_CONSERVATIVE_OFFSET_FACTOR,
-    CUTTER_SIMPLIFICATION_FACTOR,
-    CYCLOIDAL_TEMPLATE_INTERVALS,
     FLANK_OFFSET_SOLVER_MAX_EVALUATIONS,
     FLOAT_COMPARISON_ULPS,
     GEOMETRY_LENGTH_TOLERANCE_FACTOR,
@@ -67,7 +61,6 @@ from ._policy import (
     INTERSECTION_SAMPLES_PER_PITCH,
     INTERSECTION_SOLVER_MAX_EVALUATIONS,
     INTERSECTION_SOLVER_TOLERANCE,
-    INVOLUTE_TEMPLATE_FILLET_SAFETY_FACTOR,
     MAX_ANALYTIC_CURVE_SAMPLES,
     MAX_GEOMETRY_WORKERS,
     MAX_MOTION_RATIO,
@@ -78,7 +71,6 @@ from ._policy import (
     MIN_CLOSURE_CURVE_SAMPLES,
     MIN_FLANK_CURVE_SAMPLES,
     MIN_MOTION_RATIO,
-    MIN_PADDING_PITCHES,
     MIN_POLYGON_VERTEX_COUNT,
     MIN_ROOT_CURVE_SAMPLES,
     MIN_SAMPLE_TABLE_ROWS,
@@ -86,10 +78,7 @@ from ._policy import (
     MIN_SUPPORT_RADIUS_MODULE_FACTOR,
     MIN_TEETH,
     MINIMUM_PITCH_AREA_FRACTION,
-    NEAR_ZERO_LENGTH_FACTOR,
     OPEN_ANALYTIC_BACKING_RADIUS_PITCH_FACTOR,
-    OPEN_SECTOR_MIN_SEGMENTS,
-    OPEN_SECTOR_SEGMENTS_PER_RADIAN,
     OUTLINE_COLLINEAR_TOLERANCE_FRACTION,
     OUTLINE_DUPLICATE_TOLERANCE_FRACTION,
     OVERLAP_AREA_TOLERANCE_FACTOR,
@@ -100,21 +89,14 @@ from ._policy import (
     PITCH_MASK_BUFFER_QUADRANT_SEGMENTS,
     PITCH_MASK_SUPPORT_RADIUS_PITCH_FACTOR,
     RACK_MIN_TIP_THICKNESS_FACTOR,
-    RACK_SWEEP_MARGIN_FACTOR,
     ROLLING_MIN_PHASES,
     ROLLING_PHASES_PER_TOOTH,
     ROLLING_STAGGER_OFFSETS,
     ROOT_CURVE_SAMPLES_PER_TOOTH,
     ROOT_SUPPORT_RADIUS_PITCH_FACTOR,
-    SAMPLED_SWEEP_MAX_OVERLAP_ALLOWANCE,
     SLIDING_SINE_FLOOR,
     SUPPORT_BUFFER_QUADRANT_SEGMENTS,
-    SWEEP_BLANK_ALLOWANCE_MODULES,
-    SWEEP_PHASES_PER_TOOTH,
-    SWEEP_RACK_HALF_WIDTH_BLANK_FACTOR,
-    SWEEP_RACK_TOP_BLANK_FACTOR,
     TABULAR_ARRAY_DIMENSIONS,
-    TEMPLATE_FILLET_ARC_POINT_COUNT,
     TOOTH_COUNT_ABS_TOLERANCE,
     TRIM_BUFFER_QUADRANT_SEGMENTS,
     UNDERCUT_CURVATURE_SLACK_FACTOR,
@@ -175,8 +157,6 @@ class EngineConfig:
     period: float
     cycle_delta: float
     open_: bool
-    profile: str
-    cycloidal_rolling_factor: float
     input_mode: str
     samples: FloatArray
     reference_center_distance: float = 0.0
@@ -473,7 +453,7 @@ def _clean_polygon(geometry: Geometry) -> Polygon:
 def _outline(polygon: Polygon, tolerance: float) -> FloatArray:
     points = np.asarray(polygon.exterior.coords, dtype=float)
     if len(points) < MIN_CLOSED_RING_COORDINATE_COUNT:
-        raise RuntimeError("Cutter sweep left fewer than three boundary points")
+        raise RuntimeError("Geometry operation left fewer than three boundary points")
 
     # GEOS can retain nearly coincident and almost-collinear overlay vertices.
     unique = [points[0]]
@@ -526,27 +506,6 @@ def _transform_outline(
     return Polygon(transformed)
 
 
-def _open_sector(
-    start_angle: float,
-    end_angle: float,
-    inner_radius: float,
-    outer_radius: float,
-) -> Polygon:
-    span = end_angle - start_angle
-    count = max(
-        OPEN_SECTOR_MIN_SEGMENTS,
-        math.ceil(abs(span) * OPEN_SECTOR_SEGMENTS_PER_RADIAN),
-    )
-    angles = np.linspace(start_angle, end_angle, count + 1)
-    outer = np.column_stack(
-        (outer_radius * np.cos(angles), outer_radius * np.sin(angles))
-    )
-    inner = np.column_stack(
-        (inner_radius * np.cos(angles), inner_radius * np.sin(angles))
-    )
-    return Polygon(np.vstack((outer, inner[::-1])))
-
-
 def _read_sample_table(path: Path, columns: int) -> FloatArray:
     values = np.loadtxt(path, delimiter=",", skiprows=1, ndmin=2)
     if values.ndim != TABULAR_ARRAY_DIMENSIONS or values.shape[1] != columns:
@@ -578,8 +537,6 @@ def load_engine_config(
     period: float,
     cycle_delta: float,
     open_: bool,
-    profile: str,
-    cycloidal_rolling_factor: float,
     extra_arguments: tuple[str, ...] | list[str],
 ) -> EngineConfig:
     if input_flag == "--transmission-csv":
@@ -612,8 +569,6 @@ def load_engine_config(
         period=period,
         cycle_delta=cycle_delta,
         open_=open_,
-        profile=profile,
-        cycloidal_rolling_factor=cycloidal_rolling_factor,
         input_mode=input_mode,
         samples=samples,
         reference_center_distance=reference_center_distance,
@@ -785,8 +740,6 @@ class _GearGenerator:
             self.dedendum - self.fillet_radius * (1.0 - math.sin(self.alpha))
         )
         self._measure_centrodes()
-        self._rack_margin = RACK_SWEEP_MARGIN_FACTOR * config.module
-        self._rack_tooth_template = self._make_tooth_template(self._rack_margin)
 
     def _psi(self, phi: float | FloatArray, derivative: int = 0) -> float | FloatArray:
         return self.motion(phi, derivative)
@@ -902,15 +855,6 @@ class _GearGenerator:
         result = base * np.exp(1j * np.asarray(self._psi(values), dtype=float))
         return complex(result) if result.ndim == 0 else result
 
-    def _rack_pose(self, phi: float, driven: bool) -> tuple[complex, complex]:
-        if driven:
-            pitch_point = complex(self._driven_centrode(phi))
-            tangent = complex(self._driven_tangent(phi))
-        else:
-            pitch_point = complex(self._drive_centrode(phi))
-            tangent = complex(self._drive_tangent(phi))
-        return pitch_point, tangent
-
     def _drive_curvature(self, phi: FloatArray) -> FloatArray:
         first = np.asarray(self._psi(phi, 1))
         second = np.asarray(self._psi(phi, 2))
@@ -980,306 +924,10 @@ class _GearGenerator:
     def _overlap_area_tolerance(self) -> float:
         """Return the per-phase GEOS overlap allowance in squared units."""
 
-        allowance = (
-            OVERLAP_CONTACT_PAIR_ALLOWANCE
-            if self.config.profile == "involute"
-            else min(
-                SAMPLED_SWEEP_MAX_OVERLAP_ALLOWANCE,
-                max(self.drive_teeth, self.driven_teeth),
-            )
-        )
-        return OVERLAP_AREA_TOLERANCE_FACTOR * self.config.module**2 * allowance
-
-    def _involute_tooth_template(self, margin: float) -> NDArray[np.complex128]:
-        pitch = math.pi * self.config.module
-        tangent = math.tan(self.alpha)
-        root_half_width = 0.25 * pitch + self.addendum * tangent
-        sharp_tip_half_width = 0.25 * pitch - self.dedendum * tangent
-        maximum_radius = (
-            INVOLUTE_TEMPLATE_FILLET_SAFETY_FACTOR
-            * sharp_tip_half_width
-            * math.cos(self.alpha)
-            / (1.0 - math.sin(self.alpha))
-        )
-        radius = min(max(self.fillet_radius, 0.0), maximum_radius)
-        y_shift = -margin
-        points = [
-            complex(-0.5 * pitch, self.addendum + y_shift),
-            complex(-root_half_width, self.addendum + y_shift),
-        ]
-        if radius <= _length_tolerance(self.config.module, NEAR_ZERO_LENGTH_FACTOR):
-            points.extend(
-                [
-                    complex(-sharp_tip_half_width, -self.dedendum + y_shift),
-                    complex(sharp_tip_half_width, -self.dedendum + y_shift),
-                ]
-            )
-        else:
-            transition = radius * (1.0 - math.sin(self.alpha)) / math.cos(self.alpha)
-            left_center = complex(
-                -sharp_tip_half_width + transition,
-                -self.dedendum + radius + y_shift,
-            )
-            left_angles = np.linspace(
-                math.pi + self.alpha,
-                1.5 * math.pi,
-                TEMPLATE_FILLET_ARC_POINT_COUNT,
-            )
-            points.extend(left_center + radius * np.exp(1j * left_angles))
-            right_center = complex(
-                sharp_tip_half_width - transition,
-                -self.dedendum + radius + y_shift,
-            )
-            points.append(complex(right_center.real, -self.dedendum + y_shift))
-            right_angles = np.linspace(
-                -0.5 * math.pi,
-                -self.alpha,
-                TEMPLATE_FILLET_ARC_POINT_COUNT,
-            )
-            points.extend(right_center + radius * np.exp(1j * right_angles))
-        points.extend(
-            [
-                complex(root_half_width, self.addendum + y_shift),
-                complex(0.5 * pitch, self.addendum + y_shift),
-            ]
-        )
-        return np.asarray(points, dtype=np.complex128)
-
-    def _cycloidal_tooth_template(self, margin: float) -> NDArray[np.complex128]:
-        pitch = math.pi * self.config.module
-        root_half_width = 0.25 * pitch + self.addendum * math.tan(self.alpha)
-        tip_half_width = 0.25 * pitch - self.dedendum * math.tan(self.alpha)
-        blend = min(max(self.config.cycloidal_rolling_factor, 0.0), 1.0)
-        y_shift = -margin
-        q = (
-            np.arange(CYCLOIDAL_TEMPLATE_INTERVALS + 1, dtype=float)
-            / CYCLOIDAL_TEMPLATE_INTERVALS
-        )
-        tau = math.pi * q
-        x_fraction = (1.0 - blend) * q + blend * ((tau - np.sin(tau)) / math.pi)
-        y_fraction = (1.0 - blend) * q + blend * (0.5 * (1.0 - np.cos(tau)))
-        x = root_half_width + (tip_half_width - root_half_width) * x_fraction
-        y = self.addendum + (-self.dedendum - self.addendum) * y_fraction + y_shift
-        points = np.concatenate(
-            (
-                np.asarray(
-                    [
-                        complex(-0.5 * pitch, self.addendum + y_shift),
-                        complex(-root_half_width, self.addendum + y_shift),
-                    ]
-                ),
-                -x[1:] + 1j * y[1:],
-                np.asarray([complex(tip_half_width, -self.dedendum + y_shift)]),
-                x[:CYCLOIDAL_TEMPLATE_INTERVALS][::-1]
-                + 1j * y[:CYCLOIDAL_TEMPLATE_INTERVALS][::-1],
-                np.asarray([complex(0.5 * pitch, self.addendum + y_shift)]),
-            )
-        )
-        return np.asarray(points, dtype=np.complex128)
-
-    def _make_tooth_template(self, margin: float) -> NDArray[np.complex128]:
-        if self.config.profile == "cycloidal":
-            return self._cycloidal_tooth_template(margin)
-        return self._involute_tooth_template(margin)
-
-    def _make_rack(
-        self,
-        common_arc: float,
-        phase_offset: float,
-        half_width: float,
-        top: float,
-        margin: float,
-    ) -> NDArray[np.complex128]:
-        pitch = math.pi * self.config.module
-        first_center = (
-            phase_offset
-            - common_arc
-            + math.floor((-half_width - phase_offset + common_arc) / pitch) * pitch
-        )
-        center_start = first_center - 0.5 * pitch
-        center_count = math.floor((half_width + pitch - center_start) / pitch) + 1
-        centers = center_start + pitch * np.arange(center_count, dtype=float)
-        template = (
-            self._rack_tooth_template
-            if margin == self._rack_margin
-            else self._make_tooth_template(margin)
-        )
-        teeth = (centers[:, None] + template[None, :]).reshape(-1)
-        boundary = np.empty(len(teeth) + 3, dtype=np.complex128)
-        boundary[0] = complex(first_center - pitch, self.addendum - margin)
-        boundary[1:-2] = teeth
-        boundary[-2] = complex(teeth[-1].real, top)
-        boundary[-1] = complex(boundary[0].real, top)
-        return boundary
-
-    def _rack_polygon(
-        self,
-        local: NDArray[np.complex128],
-        pitch_point: complex,
-        tangent: complex,
-        outward_normal: complex,
-    ) -> Polygon:
-        duplicate_tolerance = _length_tolerance(
-            self.config.module, NEAR_ZERO_LENGTH_FACTOR
-        )
-        keep = np.concatenate(([True], np.abs(np.diff(local)) > duplicate_tolerance))
-        unique = local[keep]
-        transformed = pitch_point + unique.real * tangent + unique.imag * outward_normal
-        polygon = Polygon(np.column_stack((transformed.real, transformed.imag)))
-        if not polygon.is_valid:
-            polygon = _clean_polygon(make_valid(polygon))
-        return polygon
-
-    def _sweep_interval(self, driven: bool) -> tuple[float, float]:
-        open_padding = (
-            MIN_PADDING_PITCHES
-            * (self.active_end - self.active_start)
-            / self.drive_teeth
-        )
-        start = (
-            self.active_start
-            if self.closed
-            else max(self.config.domain_start, self.active_start - open_padding)
-        )
-        end = (
-            self.active_start + (self.driven_cycle if driven else self.drive_cycle)
-            if self.closed
-            else min(self.config.domain_end, self.active_end + open_padding)
-        )
-        return start, end
-
-    def _generate_swept_gear(
-        self, driven: bool, samples_per_radian: int
-    ) -> tuple[FloatArray, int]:
-        cycle_start, cycle_end = self._sweep_interval(driven)
-        teeth = self.driven_teeth if driven else self.drive_teeth
-        phase_count = max(
-            SWEEP_PHASES_PER_TOOTH * teeth,
-            math.ceil(abs(cycle_end - cycle_start) * samples_per_radian),
-        )
-        pitch = math.pi * self.config.module
-        blank_radius = (
-            self.maximum_pitch_radius
-            + self.addendum
-            + SWEEP_BLANK_ALLOWANCE_MODULES * self.config.module
-        )
-        rack_half_width = (
-            SWEEP_RACK_HALF_WIDTH_BLANK_FACTOR * blank_radius + 2.0 * pitch
-        )
-        rack_top = SWEEP_RACK_TOP_BLANK_FACTOR * blank_radius + pitch
-        sweep_margin = self._rack_margin
-        cutters: list[Polygon] = []
-        for phi in np.linspace(cycle_start, cycle_end, phase_count, endpoint=False):
-            phi = float(phi)
-            common_arc = self.center_distance * float(
-                self.arc_integral.integral(self.active_start, phi)
-            )
-            pitch_point, tangent = self._rack_pose(phi, driven)
-            outward_normal = (-1j if driven else 1j) * tangent
-            rack = self._make_rack(
-                common_arc,
-                0.0 if driven else 0.5 * pitch,
-                rack_half_width,
-                rack_top,
-                sweep_margin,
-            )
-            cutters.append(
-                self._rack_polygon(rack, pitch_point, tangent, outward_normal)
-            )
-        swept_cutters = union_all(cutters)
-        blank = Point(0.0, 0.0).buffer(blank_radius, quad_segs=BUFFER_QUADRANT_SEGMENTS)
-        gear: Geometry = blank.difference(swept_cutters)
-        if not self.closed:
-            if driven:
-                start_angle = float(self._psi(self.config.active_start)) + math.pi
-                end_angle = float(self._psi(self.config.active_end)) + math.pi
-            else:
-                start_angle = -self.config.active_start
-                end_angle = -self.config.active_end
-            if abs(end_angle - start_angle) >= 2.0 * math.pi - ANGLE_CLOSURE_TOLERANCE:
-                raise ValueError(
-                    "Open gear body span must be less than one body revolution"
-                )
-            inner_radius = self._support_radius(ROOT_SUPPORT_RADIUS_PITCH_FACTOR)
-            gear = gear.intersection(
-                _open_sector(start_angle, end_angle, inner_radius, blank_radius)
-            )
-        polygon = _clean_polygon(gear)
         return (
-            _outline(
-                polygon,
-                _length_tolerance(self.config.module, GEOMETRY_LENGTH_TOLERANCE_FACTOR),
-            ),
-            phase_count,
-        )
-
-    def _generate_conjugate_mate(
-        self, master: FloatArray, samples_per_radian: int
-    ) -> tuple[FloatArray, int]:
-        cycle_start, cycle_end = self._sweep_interval(True)
-        phase_count = max(
-            SWEEP_PHASES_PER_TOOTH * self.driven_teeth,
-            math.ceil(abs(cycle_end - cycle_start) * samples_per_radian),
-        )
-        blank_radius = (
-            self.maximum_pitch_radius
-            + self.addendum
-            + SWEEP_BLANK_ALLOWANCE_MODULES * self.config.module
-        )
-        cutter_tolerance = _length_tolerance(
-            self.config.module, CUTTER_SIMPLIFICATION_FACTOR
-        )
-        master_polygon = _transform_outline(master, 0.0).simplify(
-            cutter_tolerance, preserve_topology=True
-        )
-        # Rigid cutter poses are sampled rather than continuous.  Expanding the
-        # conjugate cutter by the same tolerance used to simplify its outline
-        # makes this approximation conservative and prevents phase-grid
-        # coincidences from leaving tiny islands of interference.
-        conservative_offset = max(
-            cutter_tolerance,
-            _length_tolerance(self.config.module, CUTTER_CONSERVATIVE_OFFSET_FACTOR),
-        )
-        master_polygon = master_polygon.buffer(
-            conservative_offset,
-            quad_segs=CUTTER_BUFFER_QUADRANT_SEGMENTS,
-            join_style="mitre",
-        )
-        simplified = _outline(
-            _clean_polygon(master_polygon),
-            _length_tolerance(self.config.module, ANALYTIC_JOIN_TOLERANCE_FACTOR),
-        )
-        points = simplified[:-1, 0] + 1j * simplified[:-1, 1]
-        cutters: list[Polygon] = []
-        psi_start = float(self._psi(self.active_start))
-        for phi in np.linspace(cycle_start, cycle_end, phase_count, endpoint=False):
-            drive_delta = float(phi) - self.active_start
-            driven_delta = float(self._psi(phi)) - psi_start
-            rotation = np.exp(1j * (drive_delta + driven_delta))
-            translation = -self.center_distance * np.exp(1j * driven_delta)
-            transformed = translation + rotation * points
-            cutters.append(
-                Polygon(np.column_stack((transformed.real, transformed.imag)))
-            )
-        swept_cutters = union_all(cutters)
-        blank = Point(0.0, 0.0).buffer(blank_radius, quad_segs=BUFFER_QUADRANT_SEGMENTS)
-        gear: Geometry = blank.difference(swept_cutters)
-        if not self.closed:
-            inner_radius = self._support_radius(ROOT_SUPPORT_RADIUS_PITCH_FACTOR)
-            gear = gear.intersection(
-                _open_sector(
-                    float(self._psi(self.config.active_start)) + math.pi,
-                    float(self._psi(self.config.active_end)) + math.pi,
-                    inner_radius,
-                    blank_radius,
-                )
-            )
-        return (
-            _outline(
-                _clean_polygon(gear),
-                _length_tolerance(self.config.module, GEOMETRY_LENGTH_TOLERANCE_FACTOR),
-            ),
-            phase_count,
+            OVERLAP_AREA_TOLERANCE_FACTOR
+            * self.config.module**2
+            * OVERLAP_CONTACT_PAIR_ALLOWANCE
         )
 
     def _phi_from_common_arc(self, common_arc: FloatArray) -> FloatArray:
@@ -2943,103 +2591,77 @@ class _GearGenerator:
             raise ValueError(
                 f"samples_per_radian must be at least {MIN_SAMPLES_PER_RADIAN}"
             )
-        analytic_involute = self.config.profile == "involute"
-        maximum_envelope_residual: float | None = None
-        maximum_tangency_residual: float | None = None
-        maximum_chord_error: float | None = None
-        maximum_intersection_residual = 0.0
-        maximum_join_gap = 0.0
-        maximum_fillet_root_residual = 0.0
-        analytic_undercut_count = 0
-        rolling_trim_phase_count = 0
-        rolling_initial_overlap = 0.0
-        rolling_sampled_overlap = 0.0
-        rolling_removed_area = 0.0
-        analytic_curve_sample_count = 0
-        analytic_flank_sample_count = 0
-        if analytic_involute:
-            drive_result = self._generate_analytic_involute_gear(
-                False, samples_per_radian
+        drive_result = self._generate_analytic_involute_gear(False, samples_per_radian)
+        driven_result = self._generate_analytic_involute_gear(True, samples_per_radian)
+        drive = drive_result.outline
+        driven = driven_result.outline
+        analytic_curve_sample_count = (
+            drive_result.sample_count + driven_result.sample_count
+        )
+        analytic_flank_sample_count = (
+            drive_result.flank_sample_count + driven_result.flank_sample_count
+        )
+        maximum_envelope_residual = max(
+            drive_result.maximum_envelope_residual,
+            driven_result.maximum_envelope_residual,
+        )
+        maximum_tangency_residual = max(
+            drive_result.maximum_tangency_residual,
+            driven_result.maximum_tangency_residual,
+        )
+        maximum_chord_error = max(
+            drive_result.maximum_chord_error,
+            driven_result.maximum_chord_error,
+        )
+        maximum_intersection_residual = max(
+            drive_result.maximum_intersection_residual,
+            driven_result.maximum_intersection_residual,
+        )
+        maximum_join_gap = max(
+            drive_result.maximum_join_gap,
+            driven_result.maximum_join_gap,
+        )
+        maximum_fillet_root_residual = max(
+            drive_result.maximum_fillet_root_residual,
+            driven_result.maximum_fillet_root_residual,
+        )
+        analytic_undercut_count = (
+            drive_result.undercut_count + driven_result.undercut_count
+        )
+        (
+            drive,
+            driven,
+            rolling_trim_phase_count,
+            rolling_initial_overlap,
+            rolling_sampled_overlap,
+            rolling_removed_area,
+        ) = self._trim_rolling_nonworking_interference(drive, driven)
+        envelope_tolerance = _length_tolerance(
+            self.config.module, ANALYTIC_ENVELOPE_RESIDUAL_FACTOR
+        )
+        if maximum_envelope_residual > envelope_tolerance:
+            raise RuntimeError(
+                "Analytic involute envelope residual exceeds tolerance "
+                f"({maximum_envelope_residual:.9g})"
             )
-            driven_result = self._generate_analytic_involute_gear(
-                True, samples_per_radian
+        if maximum_tangency_residual > ANALYTIC_TANGENCY_RESIDUAL_TOLERANCE:
+            raise RuntimeError(
+                "Analytic involute tangency residual exceeds tolerance "
+                f"({maximum_tangency_residual:.9g})"
             )
-            drive = drive_result.outline
-            driven = driven_result.outline
-            drive_phases = 0
-            driven_phases = 0
-            analytic_curve_sample_count = (
-                drive_result.sample_count + driven_result.sample_count
+        chord_acceptance_tolerance = _length_tolerance(
+            self.config.module,
+            ANALYTIC_CHORD_TOLERANCE_FACTOR * ANALYTIC_CHORD_ACCEPTANCE_SLACK,
+        )
+        if maximum_chord_error > chord_acceptance_tolerance:
+            raise RuntimeError(
+                "Analytic involute tessellation error exceeds tolerance "
+                f"({maximum_chord_error:.9g})"
             )
-            analytic_flank_sample_count = (
-                drive_result.flank_sample_count + driven_result.flank_sample_count
-            )
-            maximum_envelope_residual = max(
-                drive_result.maximum_envelope_residual,
-                driven_result.maximum_envelope_residual,
-            )
-            maximum_tangency_residual = max(
-                drive_result.maximum_tangency_residual,
-                driven_result.maximum_tangency_residual,
-            )
-            maximum_chord_error = max(
-                drive_result.maximum_chord_error,
-                driven_result.maximum_chord_error,
-            )
-            maximum_intersection_residual = max(
-                drive_result.maximum_intersection_residual,
-                driven_result.maximum_intersection_residual,
-            )
-            maximum_join_gap = max(
-                drive_result.maximum_join_gap,
-                driven_result.maximum_join_gap,
-            )
-            maximum_fillet_root_residual = max(
-                drive_result.maximum_fillet_root_residual,
-                driven_result.maximum_fillet_root_residual,
-            )
-            analytic_undercut_count = (
-                drive_result.undercut_count + driven_result.undercut_count
-            )
-            (
-                drive,
-                driven,
-                rolling_trim_phase_count,
-                rolling_initial_overlap,
-                rolling_sampled_overlap,
-                rolling_removed_area,
-            ) = self._trim_rolling_nonworking_interference(drive, driven)
-            envelope_tolerance = _length_tolerance(
-                self.config.module, ANALYTIC_ENVELOPE_RESIDUAL_FACTOR
-            )
-            if maximum_envelope_residual > envelope_tolerance:
-                raise RuntimeError(
-                    "Analytic involute envelope residual exceeds tolerance "
-                    f"({maximum_envelope_residual:.9g})"
-                )
-            if maximum_tangency_residual > ANALYTIC_TANGENCY_RESIDUAL_TOLERANCE:
-                raise RuntimeError(
-                    "Analytic involute tangency residual exceeds tolerance "
-                    f"({maximum_tangency_residual:.9g})"
-                )
-            chord_acceptance_tolerance = _length_tolerance(
-                self.config.module,
-                ANALYTIC_CHORD_TOLERANCE_FACTOR * ANALYTIC_CHORD_ACCEPTANCE_SLACK,
-            )
-            if maximum_chord_error > chord_acceptance_tolerance:
-                raise RuntimeError(
-                    "Analytic involute tessellation error exceeds tolerance "
-                    f"({maximum_chord_error:.9g})"
-                )
-            if maximum_fillet_root_residual > envelope_tolerance:
-                raise RuntimeError(
-                    "Analytic rack-tip fillet does not meet the dedendum "
-                    f"({maximum_fillet_root_residual:.9g})"
-                )
-        else:
-            drive, drive_phases = self._generate_swept_gear(False, samples_per_radian)
-            driven, driven_phases = self._generate_conjugate_mate(
-                drive, samples_per_radian
+        if maximum_fillet_root_residual > envelope_tolerance:
+            raise RuntimeError(
+                "Analytic rack-tip fillet does not meet the dedendum "
+                f"({maximum_fillet_root_residual:.9g})"
             )
         drive_centrode_outline_distance = self._drive_centrode_outline_distance(drive)
         centrode_fidelity_tolerance = (
@@ -3051,14 +2673,9 @@ class _GearGenerator:
             drive_centrode_outline_distance is not None
             and drive_centrode_outline_distance > centrode_fidelity_tolerance
         ):
-            failure = (
-                "Analytic involute arrangement did not preserve the requested "
-                "drive centrode"
-                if analytic_involute
-                else "Rack sweep self-occluded the requested drive centrode"
-            )
             raise RuntimeError(
-                f"{failure} "
+                "Analytic involute arrangement did not preserve the requested "
+                "drive centrode "
                 f"(outline distance {drive_centrode_outline_distance:.9g}, "
                 f"tooth-envelope tolerance {centrode_fidelity_tolerance:.9g})"
             )
@@ -3074,13 +2691,9 @@ class _GearGenerator:
             )
             outline_area = abs(_signed_area(drive))
             if outline_area < MINIMUM_PITCH_AREA_FRACTION * pitch_area:
-                backend_name = (
-                    "Analytic involute arrangement"
-                    if analytic_involute
-                    else "Rack sweep"
-                )
                 raise RuntimeError(
-                    f"{backend_name} disconnected the intended drive-gear body "
+                    "Analytic involute arrangement disconnected the intended "
+                    "drive-gear body "
                     f"(outline area {outline_area:.9g}, drive-centrode enclosed "
                     f"area {pitch_area:.9g})"
                 )
@@ -3097,15 +2710,7 @@ class _GearGenerator:
             self.addendum / max(SLIDING_SINE_FLOOR, math.sin(self.alpha))
             + 0.5 * math.pi * self.config.module
         )
-        total_phases = drive_phases + driven_phases
-        profile_family = (
-            "generalized_involute"
-            if analytic_involute
-            else f"{self.config.profile}_rack"
-        )
-        generation_backend = (
-            "analytic_form" if analytic_involute else "sampled_cutter_sweep"
-        )
+        generation_backend = "hybrid_analytic_involute"
         metadata: dict[str, object] = {
             "name": self.config.name,
             "description": self.config.description,
@@ -3118,7 +2723,7 @@ class _GearGenerator:
             "period": self.config.period,
             "cycle_delta": self.config.cycle_delta,
             "centrode_reference_center_distance": self.config.reference_center_distance,
-            "profile_family": profile_family,
+            "profile_family": "generalized_involute",
             "generation_backend": generation_backend,
             "geometry_backend": "shapely-geos",
             "geometry_precision": "double",
@@ -3149,28 +2754,15 @@ class _GearGenerator:
             "minimum_driven_curvature": self.minimum_driven_curvature,
             "drive_centrode_outline_distance": drive_centrode_outline_distance,
             "centrode_fidelity_tolerance": centrode_fidelity_tolerance,
-            "cutter_sweep_phase_count": total_phases,
             "analytic_curve_sample_count": analytic_curve_sample_count,
             "analytic_flank_sample_count": analytic_flank_sample_count,
             "maximum_envelope_residual": maximum_envelope_residual,
             "maximum_envelope_tangency_residual": maximum_tangency_residual,
             "maximum_analytic_chord_error": maximum_chord_error,
-            "nonworking_closure": (
-                "analytic_rack_tip_and_dedendum_envelopes"
-                if analytic_involute
-                else "generated_cutter_root"
-            ),
+            "nonworking_closure": ("analytic_rack_tip_and_dedendum_envelopes"),
             "requested_fillet_radius": self.fillet_radius,
             "requested_fillet_applied_to_closure": True,
             "verification_phase_count": verification_phases,
-            "sweep_angular_step": (
-                0.0
-                if analytic_involute
-                else max(
-                    self.drive_cycle / drive_phases,
-                    self.driven_cycle / driven_phases,
-                )
-            ),
             "maximum_transmission_error": transmission_error,
             "maximum_sliding_velocity_factor": (1.0 + maximum_ratio)
             * contact_distance_bound,
@@ -3184,11 +2776,7 @@ class _GearGenerator:
             f"Generated {self.config.name} with {generation_backend} "
             "and Shapely/GEOS: "
             f"{self.drive_teeth}:{self.driven_teeth} teeth, "
-            + (
-                f"{analytic_flank_sample_count} analytic flank samples"
-                if analytic_involute
-                else f"{total_phases} cutter poses"
-            )
+            f"{analytic_flank_sample_count} analytic flank samples"
         )
         return EngineResult(drive, driven, metadata, log)
 

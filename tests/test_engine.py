@@ -20,7 +20,6 @@ from ncgears._policy import (
     ROLLING_MIN_PHASES,
     ROLLING_STAGGER_OFFSETS,
     ROOT_SUPPORT_RADIUS_PITCH_FACTOR,
-    SWEEP_PHASES_PER_TOOTH,
     VERIFICATION_MIN_CLOSED_PHASES,
     VERIFICATION_MIN_OPEN_PHASES,
 )
@@ -31,41 +30,38 @@ def _assert_verified_pair(pair: ncgears.GearPair) -> None:
     assert pair.metadata["geometry_backend"] == "shapely-geos"
     assert pair.metadata["geometry_precision"] == "double"
     assert pair.metadata["geometry_worker_limit"] >= 1
-    if pair.metadata["generation_backend"] == "analytic_form":
-        assert pair.metadata["cutter_sweep_phase_count"] == 0
-        assert pair.metadata["analytic_flank_sample_count"] >= (
-            MIN_FLANK_CURVE_SAMPLES * (pair.drive_teeth + pair.driven_teeth)
-        )
-        assert pair.metadata["nonworking_closure"] == (
-            "analytic_rack_tip_and_dedendum_envelopes"
-        )
-        assert pair.metadata["requested_fillet_applied_to_closure"] is True
-        assert pair.metadata["maximum_join_gap"] < (
-            INTERSECTION_RESIDUAL_FACTOR * pair.metadata["module"]
-        )
-        assert pair.metadata["maximum_intersection_residual"] < (
-            INTERSECTION_RESIDUAL_FACTOR * pair.metadata["module"]
-        )
-        assert pair.metadata["maximum_fillet_root_residual"] < (
-            ANALYTIC_ENVELOPE_RESIDUAL_FACTOR * pair.metadata["module"]
-        )
-        assert pair.metadata["rolling_nonworking_trim_phase_count"] >= (
-            ROLLING_MIN_PHASES * len(ROLLING_STAGGER_OFFSETS)
-        )
-        assert pair.metadata["maximum_envelope_residual"] < 1e-9
-        assert (
-            pair.metadata["maximum_envelope_tangency_residual"]
-            < ANALYTIC_TANGENCY_RESIDUAL_TOLERANCE
-        )
-        assert pair.metadata["maximum_analytic_chord_error"] < (
-            ANALYTIC_CHORD_TOLERANCE_FACTOR
-            * ANALYTIC_CHORD_ACCEPTANCE_SLACK
-            * pair.metadata["module"]
-        )
-    else:
-        assert pair.metadata["cutter_sweep_phase_count"] >= SWEEP_PHASES_PER_TOOTH * (
-            pair.drive_teeth + pair.driven_teeth
-        )
+    assert pair.metadata["generation_backend"] == ("hybrid_analytic_involute")
+    assert "cutter_sweep_phase_count" not in pair.metadata
+    assert "sweep_angular_step" not in pair.metadata
+    assert pair.metadata["analytic_flank_sample_count"] >= (
+        MIN_FLANK_CURVE_SAMPLES * (pair.drive_teeth + pair.driven_teeth)
+    )
+    assert pair.metadata["nonworking_closure"] == (
+        "analytic_rack_tip_and_dedendum_envelopes"
+    )
+    assert pair.metadata["requested_fillet_applied_to_closure"] is True
+    assert pair.metadata["maximum_join_gap"] < (
+        INTERSECTION_RESIDUAL_FACTOR * pair.metadata["module"]
+    )
+    assert pair.metadata["maximum_intersection_residual"] < (
+        INTERSECTION_RESIDUAL_FACTOR * pair.metadata["module"]
+    )
+    assert pair.metadata["maximum_fillet_root_residual"] < (
+        ANALYTIC_ENVELOPE_RESIDUAL_FACTOR * pair.metadata["module"]
+    )
+    assert pair.metadata["rolling_nonworking_trim_phase_count"] >= (
+        ROLLING_MIN_PHASES * len(ROLLING_STAGGER_OFFSETS)
+    )
+    assert pair.metadata["maximum_envelope_residual"] < 1e-9
+    assert (
+        pair.metadata["maximum_envelope_tangency_residual"]
+        < ANALYTIC_TANGENCY_RESIDUAL_TOLERANCE
+    )
+    assert pair.metadata["maximum_analytic_chord_error"] < (
+        ANALYTIC_CHORD_TOLERANCE_FACTOR
+        * ANALYTIC_CHORD_ACCEPTANCE_SLACK
+        * pair.metadata["module"]
+    )
     assert pair.metadata["verification_method"] == "staggered_sampled_phase_grid"
     assert pair.metadata["verification_stagger_grid_count"] == len(
         ROLLING_STAGGER_OFFSETS
@@ -90,6 +86,20 @@ def _assert_verified_pair(pair: ncgears.GearPair) -> None:
         assert polygon.area > 1.0
 
 
+def test_hybrid_analytic_involute_is_the_only_geometry_engine() -> None:
+    fields = EngineConfig.__dataclass_fields__
+
+    assert "profile" not in fields
+    assert "cycloidal_rolling_factor" not in fields
+    for removed_method in (
+        "_generate_swept_gear",
+        "_generate_conjugate_mate",
+        "_involute_tooth_template",
+        "_cycloidal_tooth_template",
+    ):
+        assert not hasattr(_GearGenerator, removed_method)
+
+
 def test_python_engine_generates_unequal_ratio_pair(tmp_path: Path) -> None:
     pair = ncgears.generate(
         "2*phi",
@@ -105,7 +115,7 @@ def test_python_engine_generates_unequal_ratio_pair(tmp_path: Path) -> None:
     assert pair.driven_teeth == 6
     assert pair.ratio == pytest.approx(2.0)
     assert pair.center_distance == pytest.approx(9.0, abs=1e-8)
-    assert pair.metadata["generation_backend"] == "analytic_form"
+    assert pair.metadata["generation_backend"] == ("hybrid_analytic_involute")
     assert pair.metadata["profile_family"] == "generalized_involute"
 
 
@@ -144,8 +154,6 @@ def test_closed_motion_validation_cannot_alias_between_grid_points() -> None:
         period=2.0 * math.pi,
         cycle_delta=4.0 * math.pi,
         open_=False,
-        profile="involute",
-        cycloidal_rolling_factor=0.35,
         input_mode="transmission",
         samples=np.column_stack((phi, psi, psi_first, psi_second)),
     )
@@ -235,7 +243,7 @@ def test_python_engine_solves_centrode_center_distance(tmp_path: Path) -> None:
     assert pair.metadata["input_mode"] == "drive_centrode"
     assert pair.metadata["centrode_reference_center_distance"] > 1.08
     assert pair.ratio == pytest.approx(1.0, abs=1e-8)
-    assert pair.metadata["generation_backend"] == "analytic_form"
+    assert pair.metadata["generation_backend"] == ("hybrid_analytic_involute")
 
 
 def test_python_engine_generates_open_segment(tmp_path: Path) -> None:
@@ -253,7 +261,7 @@ def test_python_engine_generates_open_segment(tmp_path: Path) -> None:
 
     _assert_verified_pair(pair)
     assert pair.metadata["topology"] == "open"
-    assert pair.metadata["generation_backend"] == "analytic_form"
+    assert pair.metadata["generation_backend"] == ("hybrid_analytic_involute")
     assert pair.metadata["profile_family"] == "generalized_involute"
     assert pair.ratio == pytest.approx(
         (1.8 * 2.4 + 0.03 * math.sin(2.4)) / 2.4,
@@ -329,27 +337,6 @@ def test_open_quadratic_uses_parameter_clipped_padding_invariant_boundary(
         assert abs(shallow.area - deep.area) < 2e-4
 
 
-def test_cycloidal_mate_uses_conservative_sampled_envelope(
-    tmp_path: Path,
-) -> None:
-    pair = ncgears.generate(
-        "phi - 0.08*sin(2*phi)",
-        name="cycloidal",
-        teeth=28,
-        profile="cycloidal",
-        dedendum_factor=1.15,
-        fillet_factor=0.2,
-        samples=1024,
-        samples_per_radian=110,
-        output_directory=tmp_path,
-    )
-
-    _assert_verified_pair(pair)
-    assert pair.metadata["profile_family"] == "cycloidal_rack"
-    tolerance = pair.metadata["overlap_area_tolerance"]
-    assert pair.metadata["placed_pair_overlap_area"] <= tolerance
-
-
 def test_mild_nonconvex_centrode_stays_within_tooth_envelope(
     tmp_path: Path,
 ) -> None:
@@ -365,7 +352,7 @@ def test_mild_nonconvex_centrode_stays_within_tooth_envelope(
     _assert_verified_pair(pair)
     assert pair.metadata["centrodes_are_convex"] is False
     assert pair.metadata["profile_family"] == "generalized_involute"
-    assert pair.metadata["generation_backend"] == "analytic_form"
+    assert pair.metadata["generation_backend"] == ("hybrid_analytic_involute")
     assert pair.metadata["maximum_drive_curvature"] > 0.0
     assert (
         pair.metadata["drive_centrode_outline_distance"]
@@ -381,7 +368,6 @@ def test_deep_nonconvex_centrode_uses_analytic_involute_form(
         name="deep_nonconvex",
         teeth=100,
         target_cycle_delta=5.0 * math.pi,
-        profile="involute",
         samples=1024,
         samples_per_radian=20,
         output_directory=tmp_path,
@@ -393,7 +379,7 @@ def test_deep_nonconvex_centrode_uses_analytic_involute_form(
     assert pair.drive_teeth == 100
     assert pair.driven_teeth == 40
     assert pair.metadata["centrodes_are_convex"] is False
-    assert pair.metadata["generation_backend"] == "analytic_form"
+    assert pair.metadata["generation_backend"] == ("hybrid_analytic_involute")
     assert pair.metadata["profile_family"] == "generalized_involute"
     assert relative_concavity > 0.05
     assert (

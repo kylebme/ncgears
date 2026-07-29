@@ -13,7 +13,6 @@ if str(ROOT) not in sys.path:
 from ncgears import generate_from_centrode
 from ncgears._policy import (
     DEFAULT_ADDENDUM_FACTOR,
-    DEFAULT_CYCLOIDAL_ROLLING_FACTOR,
     DEFAULT_DEDENDUM_FACTOR,
     DEFAULT_FILLET_FACTOR,
     DEFAULT_INPUT_SAMPLES,
@@ -68,14 +67,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Net mate advance used when solving an omitted center distance",
     )
     parser.add_argument(
-        "--profile", choices=("involute", "cycloidal"), default="involute"
-    )
-    parser.add_argument(
-        "--cycloidal-rolling-factor",
-        type=float,
-        default=DEFAULT_CYCLOIDAL_ROLLING_FACTOR,
-    )
-    parser.add_argument(
         "--samples-per-radian",
         type=int,
         default=DEFAULT_SAMPLES_PER_RADIAN,
@@ -105,8 +96,6 @@ def main(argv: list[str] | None = None) -> int:
         padding_pitches=args.padding_pitches,
         reference_center_distance=args.center_distance,
         target_cycle_delta=args.cycle_delta,
-        profile=args.profile,
-        cycloidal_rolling_factor=args.cycloidal_rolling_factor,
         samples_per_radian=args.samples_per_radian,
         output_directory=args.out,
         render=not args.no_render,

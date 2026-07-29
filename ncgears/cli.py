@@ -44,11 +44,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--drive-end", type=float, default=2.0 * math.pi)
     parser.add_argument("--period", type=float, default=2.0 * math.pi)
     parser.add_argument(
-        "--profile",
-        choices=("involute", "cycloidal"),
-        default="involute",
-    )
-    parser.add_argument(
         "--center-distance",
         type=float,
         help="centrode reference distance, in the expression's radius units",
@@ -93,7 +88,6 @@ def main(argv: list[str] | None = None) -> int:
         "period": args.period,
         "open_": args.open_,
         "samples": args.samples,
-        "profile": args.profile,
         "samples_per_radian": args.samples_per_radian,
         "output_directory": args.output,
         "render": args.render,

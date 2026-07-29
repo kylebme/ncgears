@@ -13,7 +13,6 @@ import sympy as sp
 
 from ._policy import (
     DEFAULT_ADDENDUM_FACTOR,
-    DEFAULT_CYCLOIDAL_ROLLING_FACTOR,
     DEFAULT_DEDENDUM_FACTOR,
     DEFAULT_FILLET_FACTOR,
     DEFAULT_INPUT_SAMPLES,
@@ -113,8 +112,6 @@ def _validate_common(
     period: float,
     samples: int,
     padding_pitches: float,
-    profile: str,
-    cycloidal_rolling_factor: float,
     samples_per_radian: int,
 ) -> None:
     if not _SAFE_NAME.fullmatch(name):
@@ -145,10 +142,6 @@ def _validate_common(
         raise ValueError(f"samples must be at least {MIN_INPUT_SAMPLES}")
     if padding_pitches < MIN_PADDING_PITCHES:
         raise ValueError(f"padding_pitches must be at least {MIN_PADDING_PITCHES:g}")
-    if profile not in {"involute", "cycloidal"}:
-        raise ValueError("profile must be 'involute' or 'cycloidal'")
-    if not 0.0 <= cycloidal_rolling_factor <= 1.0:
-        raise ValueError("cycloidal_rolling_factor must be between 0 and 1")
     if samples_per_radian < MIN_SAMPLES_PER_RADIAN:
         raise ValueError(
             f"samples_per_radian must be at least {MIN_SAMPLES_PER_RADIAN}"
@@ -190,8 +183,6 @@ def _run_generator(
     period: float,
     cycle_delta: float,
     open_: bool,
-    profile: str,
-    cycloidal_rolling_factor: float,
     samples_per_radian: int,
     output_root: Path,
     generator: str | Path | None,
@@ -221,8 +212,6 @@ def _run_generator(
             period=period,
             cycle_delta=cycle_delta,
             open_=open_,
-            profile=profile,
-            cycloidal_rolling_factor=cycloidal_rolling_factor,
             extra_arguments=extra_arguments,
         )
         result = generate_geometry(config, samples_per_radian)
@@ -279,8 +268,6 @@ def generate_from_transmission(
     open_: bool = False,
     samples: int = DEFAULT_INPUT_SAMPLES,
     padding_pitches: float = DEFAULT_PADDING_PITCHES,
-    profile: str = "involute",
-    cycloidal_rolling_factor: float = DEFAULT_CYCLOIDAL_ROLLING_FACTOR,
     samples_per_radian: int = DEFAULT_SAMPLES_PER_RADIAN,
     output_directory: str | Path = "out",
     generator: str | Path | None = None,
@@ -307,8 +294,6 @@ def generate_from_transmission(
         period=period,
         samples=samples,
         padding_pitches=padding_pitches,
-        profile=profile,
-        cycloidal_rolling_factor=cycloidal_rolling_factor,
         samples_per_radian=samples_per_radian,
     )
     parsed = _parse_expression(expression)
@@ -403,8 +388,6 @@ def generate_from_transmission(
         period=period,
         cycle_delta=cycle_delta,
         open_=open_,
-        profile=profile,
-        cycloidal_rolling_factor=cycloidal_rolling_factor,
         samples_per_radian=samples_per_radian,
         output_root=output_root,
         generator=generator,
@@ -431,8 +414,6 @@ def generate_from_centrode(
     padding_pitches: float = DEFAULT_PADDING_PITCHES,
     reference_center_distance: float | None = None,
     target_cycle_delta: float = 2.0 * math.pi,
-    profile: str = "involute",
-    cycloidal_rolling_factor: float = DEFAULT_CYCLOIDAL_ROLLING_FACTOR,
     samples_per_radian: int = DEFAULT_SAMPLES_PER_RADIAN,
     output_directory: str | Path = "out",
     generator: str | Path | None = None,
@@ -458,8 +439,6 @@ def generate_from_centrode(
         period=period,
         samples=samples,
         padding_pitches=padding_pitches,
-        profile=profile,
-        cycloidal_rolling_factor=cycloidal_rolling_factor,
         samples_per_radian=samples_per_radian,
     )
     if reference_center_distance is not None and reference_center_distance <= 0.0:
@@ -536,8 +515,6 @@ def generate_from_centrode(
         period=period,
         cycle_delta=target_cycle_delta,
         open_=open_,
-        profile=profile,
-        cycloidal_rolling_factor=cycloidal_rolling_factor,
         samples_per_radian=samples_per_radian,
         output_root=output_root,
         generator=generator,

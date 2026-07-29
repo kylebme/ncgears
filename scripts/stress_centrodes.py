@@ -9,12 +9,12 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from ncgears import generate_from_centrode
+from ncgears.errors import ncgearsError
 
 
 @dataclass(frozen=True)
@@ -25,7 +25,6 @@ class StressCase:
     category: str
     reference_center_distance: float | None = None
     target_cycle_delta: float = 2.0 * math.pi
-    profile: str = "involute"
     note: str = ""
     expected_to_pass: bool = True
 
@@ -79,7 +78,6 @@ CASES = [
         teeth=100,
         category="unequal_ratio_multilobe",
         target_cycle_delta=5.0 * math.pi,
-        profile="involute",
         note=(
             "Nonconvex five-lobe centrode exercising the analytic involute "
             "backend with a repeat-compatible 100:40 tooth closure."
@@ -186,7 +184,6 @@ CASES = [
         teeth=100,
         category="analytic_nonconvex_regression",
         target_cycle_delta=5.0 * math.pi,
-        profile="involute",
         note=(
             "Former rack-self-occlusion regression; the analytic involute "
             "backend must retain the five concavities."
@@ -246,7 +243,6 @@ def main() -> int:
                 samples=args.samples,
                 reference_center_distance=case.reference_center_distance,
                 target_cycle_delta=case.target_cycle_delta,
-                profile=case.profile,
                 samples_per_radian=args.samples_per_radian,
                 output_directory=args.out,
                 render=not args.no_render,
@@ -279,11 +275,8 @@ def main() -> int:
                     "centrode_fidelity_tolerance": metadata[
                         "centrode_fidelity_tolerance"
                     ],
-                    "cutter_sweep_phase_count": metadata["cutter_sweep_phase_count"],
                     "generation_backend": metadata["generation_backend"],
-                    "maximum_envelope_residual": metadata[
-                        "maximum_envelope_residual"
-                    ],
+                    "maximum_envelope_residual": metadata["maximum_envelope_residual"],
                     "maximum_envelope_tangency_residual": metadata[
                         "maximum_envelope_tangency_residual"
                     ],
@@ -295,7 +288,7 @@ def main() -> int:
                 f"error={metadata['maximum_transmission_error']:.3g}, "
                 f"overlap={metadata['placed_pair_overlap_area']:.3g}"
             )
-        except Exception as error:
+        except (ncgearsError, ValueError, OSError) as error:
             record.update(
                 {
                     "status": "failed",

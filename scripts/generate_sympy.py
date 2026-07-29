@@ -18,7 +18,6 @@ if str(ROOT) not in sys.path:
 from ncgears import generate
 from ncgears._policy import (
     DEFAULT_ADDENDUM_FACTOR,
-    DEFAULT_CYCLOIDAL_ROLLING_FACTOR,
     DEFAULT_DEDENDUM_FACTOR,
     DEFAULT_FILLET_FACTOR,
     DEFAULT_INPUT_SAMPLES,
@@ -60,14 +59,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--allow-nonconvex", action="store_true")
     parser.add_argument(
-        "--profile", choices=("involute", "cycloidal"), default="involute"
-    )
-    parser.add_argument(
-        "--cycloidal-rolling-factor",
-        type=float,
-        default=DEFAULT_CYCLOIDAL_ROLLING_FACTOR,
-    )
-    parser.add_argument(
         "--samples-per-radian",
         type=int,
         default=DEFAULT_SAMPLES_PER_RADIAN,
@@ -94,8 +85,6 @@ def main(argv: list[str] | None = None) -> int:
         open_=args.open_,
         samples=args.samples,
         padding_pitches=args.padding_pitches,
-        profile=args.profile,
-        cycloidal_rolling_factor=args.cycloidal_rolling_factor,
         samples_per_radian=args.samples_per_radian,
         output_directory=args.out,
         render=not args.no_render,
