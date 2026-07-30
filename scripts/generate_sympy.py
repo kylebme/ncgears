@@ -16,6 +16,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from ncgears import generate
+from ncgears._policy import (
+    DEFAULT_ADDENDUM_FACTOR,
+    DEFAULT_DEDENDUM_FACTOR,
+    DEFAULT_FILLET_FACTOR,
+    DEFAULT_INPUT_SAMPLES,
+    DEFAULT_MODULE,
+    DEFAULT_PADDING_PITCHES,
+    DEFAULT_PRESSURE_ANGLE_DEG,
+    DEFAULT_SAMPLES_PER_RADIAN,
+    DEFAULT_TEETH,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -25,23 +36,33 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("expression")
     parser.add_argument("--name", default="expression")
     parser.add_argument("--open", action="store_true", dest="open_")
-    parser.add_argument("--teeth", type=int, default=16)
-    parser.add_argument("--module", type=float, default=1.0)
-    parser.add_argument("--pressure-angle-deg", type=float, default=20.0)
-    parser.add_argument("--addendum-factor", type=float, default=1.0)
-    parser.add_argument("--dedendum-factor", type=float, default=1.2)
-    parser.add_argument("--fillet-factor", type=float, default=0.3)
+    parser.add_argument("--teeth", type=int, default=DEFAULT_TEETH)
+    parser.add_argument("--module", type=float, default=DEFAULT_MODULE)
+    parser.add_argument(
+        "--pressure-angle-deg",
+        type=float,
+        default=DEFAULT_PRESSURE_ANGLE_DEG,
+    )
+    parser.add_argument(
+        "--addendum-factor", type=float, default=DEFAULT_ADDENDUM_FACTOR
+    )
+    parser.add_argument(
+        "--dedendum-factor", type=float, default=DEFAULT_DEDENDUM_FACTOR
+    )
+    parser.add_argument("--fillet-factor", type=float, default=DEFAULT_FILLET_FACTOR)
     parser.add_argument("--drive-start", type=float, default=0.0)
     parser.add_argument("--drive-end", type=float, default=2.0 * math.pi)
     parser.add_argument("--period", type=float, default=2.0 * math.pi)
-    parser.add_argument("--samples", type=int, default=8192)
-    parser.add_argument("--padding-pitches", type=float, default=7.0)
+    parser.add_argument("--samples", type=int, default=DEFAULT_INPUT_SAMPLES)
+    parser.add_argument(
+        "--padding-pitches", type=float, default=DEFAULT_PADDING_PITCHES
+    )
     parser.add_argument("--allow-nonconvex", action="store_true")
     parser.add_argument(
-        "--profile", choices=("involute", "cycloidal"), default="involute"
+        "--samples-per-radian",
+        type=int,
+        default=DEFAULT_SAMPLES_PER_RADIAN,
     )
-    parser.add_argument("--cycloidal-rolling-factor", type=float, default=0.35)
-    parser.add_argument("--samples-per-radian", type=int, default=110)
     parser.add_argument("--out", type=Path, default=ROOT / "out")
     parser.add_argument("--no-render", action="store_true")
     return parser
@@ -64,8 +85,6 @@ def main(argv: list[str] | None = None) -> int:
         open_=args.open_,
         samples=args.samples,
         padding_pitches=args.padding_pitches,
-        profile=args.profile,
-        cycloidal_rolling_factor=args.cycloidal_rolling_factor,
         samples_per_radian=args.samples_per_radian,
         output_directory=args.out,
         render=not args.no_render,

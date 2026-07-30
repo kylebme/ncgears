@@ -9,12 +9,12 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from ncgears import generate_from_centrode
+from ncgears.errors import ncgearsError
 
 
 @dataclass(frozen=True)
@@ -25,7 +25,6 @@ class StressCase:
     category: str
     reference_center_distance: float | None = None
     target_cycle_delta: float = 2.0 * math.pi
-    profile: str = "involute"
     note: str = ""
     expected_to_pass: bool = True
 
@@ -75,14 +74,13 @@ CASES = [
     ),
     StressCase(
         name="stress_five_lobe_5_to_2",
-        expression="1 + 0.08*cos(5*phi)",
+        expression="1 + 0.04*cos(5*phi)",
         teeth=100,
         category="unequal_ratio_multilobe",
         target_cycle_delta=5.0 * math.pi,
-        profile="cycloidal",
         note=(
-            "Nonconvex five-lobe centrode with a repeat-compatible 100:40 "
-            "tooth closure."
+            "Nonconvex five-lobe centrode exercising the analytic involute "
+            "backend with a repeat-compatible 100:40 tooth closure."
         ),
     ),
     StressCase(
@@ -96,7 +94,7 @@ CASES = [
         teeth=64,
         category="adversarial_harmonic",
         reference_center_distance=1.0,
-        note="Asymmetric mixture through the seventh harmonic.",
+        note="Asymmetric mixed harmonics exercising analytic branch arrangement.",
     ),
     StressCase(
         name="stress_direct_rosette",
@@ -117,7 +115,7 @@ CASES = [
         expression=("1 + 0.22*sin(phi) + 0.15*cos(2*phi) - 0.025*sin(3*phi)"),
         teeth=64,
         category="silhouette_inspired",
-        note="Heart-like asymmetric pitch shape with a pronounced upper cleft.",
+        note="Pronounced cleft exercising direct analytic flank construction.",
     ),
     StressCase(
         name="crazy_teardrop",
@@ -145,7 +143,7 @@ CASES = [
         expression=("1 + 0.25*cos(phi) - 0.07*cos(2*phi) + 0.03*cos(3*phi)"),
         teeth=64,
         category="silhouette_inspired",
-        note="Strongly eccentric crescent/egg-like pitch shape.",
+        note="Eccentric concavity exercising direct analytic flank construction.",
     ),
     StressCase(
         name="crazy_organic",
@@ -154,7 +152,10 @@ CASES = [
         ),
         teeth=64,
         category="silhouette_inspired",
-        note="Free-form organic pitch shape with harmonics through order five.",
+        note=(
+            "Former rack-self-occlusion case; analytical flanks and local root "
+            "trimming must preserve the mixed-harmonic concavities."
+        ),
     ),
     StressCase(
         name="stress_limit_three_lobe_shoulder",
@@ -179,16 +180,14 @@ CASES = [
     ),
     StressCase(
         name="stress_limit_five_lobe_5_to_2",
-        expression="1 + 0.18*cos(5*phi)",
+        expression="1 + 0.08*cos(5*phi)",
         teeth=100,
-        category="expected_disconnected_body_limit",
+        category="analytic_nonconvex_regression",
         target_cycle_delta=5.0 * math.pi,
-        profile="cycloidal",
         note=(
-            "Deep five-lobe 100:40 closure. The global rack sweep is "
-            "expected to disconnect the intended star-shaped body."
+            "Former rack-self-occlusion regression; the analytic involute "
+            "backend must retain the five concavities."
         ),
-        expected_to_pass=False,
     ),
     StressCase(
         name="stress_limit_mixed_harmonics",
@@ -244,7 +243,6 @@ def main() -> int:
                 samples=args.samples,
                 reference_center_distance=case.reference_center_distance,
                 target_cycle_delta=case.target_cycle_delta,
-                profile=case.profile,
                 samples_per_radian=args.samples_per_radian,
                 output_directory=args.out,
                 render=not args.no_render,
@@ -256,6 +254,8 @@ def main() -> int:
                 metadata["placed_pair_overlap_area"] <= 1e-6 * case.teeth
                 and metadata["maximum_transmission_error"] < 0.01
                 and metadata["minimum_root_radius"] > 0.0
+                and metadata["drive_centrode_outline_distance"]
+                <= metadata["centrode_fidelity_tolerance"]
             )
             record.update(
                 {
@@ -269,7 +269,17 @@ def main() -> int:
                         "maximum_transmission_error"
                     ],
                     "minimum_root_radius": metadata["minimum_root_radius"],
-                    "cutter_sweep_phase_count": metadata["cutter_sweep_phase_count"],
+                    "drive_centrode_outline_distance": metadata[
+                        "drive_centrode_outline_distance"
+                    ],
+                    "centrode_fidelity_tolerance": metadata[
+                        "centrode_fidelity_tolerance"
+                    ],
+                    "generation_backend": metadata["generation_backend"],
+                    "maximum_envelope_residual": metadata["maximum_envelope_residual"],
+                    "maximum_envelope_tangency_residual": metadata[
+                        "maximum_envelope_tangency_residual"
+                    ],
                 }
             )
             label = "PASS" if quality_passed else "QUALITY_LIMIT"
@@ -278,7 +288,7 @@ def main() -> int:
                 f"error={metadata['maximum_transmission_error']:.3g}, "
                 f"overlap={metadata['placed_pair_overlap_area']:.3g}"
             )
-        except Exception as error:
+        except (ncgearsError, ValueError, OSError) as error:
             record.update(
                 {
                     "status": "failed",

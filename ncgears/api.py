@@ -11,6 +11,25 @@ from pathlib import Path
 import numpy as np
 import sympy as sp
 
+from ._policy import (
+    DEFAULT_ADDENDUM_FACTOR,
+    DEFAULT_DEDENDUM_FACTOR,
+    DEFAULT_FILLET_FACTOR,
+    DEFAULT_INPUT_SAMPLES,
+    DEFAULT_MODULE,
+    DEFAULT_PADDING_PITCHES,
+    DEFAULT_PRESSURE_ANGLE_DEG,
+    DEFAULT_SAMPLES_PER_RADIAN,
+    DEFAULT_TEETH,
+    EXPRESSION_ENDPOINT_TOLERANCE,
+    MAX_PRESSURE_ANGLE_DEG,
+    MIN_INPUT_SAMPLES,
+    MIN_MOTION_RATIO,
+    MIN_PADDING_PITCHES,
+    MIN_SAMPLES_PER_RADIAN,
+    MIN_TEETH,
+    TOOTH_COUNT_ABS_TOLERANCE,
+)
 from .engine import generate_geometry, load_engine_config
 from .errors import GenerationError
 from .result import GearPair
@@ -93,8 +112,6 @@ def _validate_common(
     period: float,
     samples: int,
     padding_pitches: float,
-    profile: str,
-    cycloidal_rolling_factor: float,
     samples_per_radian: int,
 ) -> None:
     if not _SAFE_NAME.fullmatch(name):
@@ -102,28 +119,33 @@ def _validate_common(
             "name must start with a letter or digit and contain only letters, "
             "digits, dots, underscores, and hyphens"
         )
-    if teeth < 6:
-        raise ValueError("teeth must be at least 6")
+    if teeth < MIN_TEETH:
+        raise ValueError(f"teeth must be at least {MIN_TEETH}")
     if module <= 0.0:
         raise ValueError("module must be positive")
-    if not 0.0 < pressure_angle_deg < 45.0:
-        raise ValueError("pressure_angle_deg must be between 0 and 45")
-    if min(addendum_factor, dedendum_factor, fillet_factor) <= 0.0:
-        raise ValueError("tooth height and fillet factors must be positive")
+    if not 0.0 < pressure_angle_deg < MAX_PRESSURE_ANGLE_DEG:
+        raise ValueError(
+            f"pressure_angle_deg must be between 0 and {MAX_PRESSURE_ANGLE_DEG:g}"
+        )
+    if addendum_factor <= 0.0 or dedendum_factor <= 0.0 or fillet_factor < 0.0:
+        raise ValueError(
+            "tooth height factors must be positive and fillet_factor "
+            "must be nonnegative"
+        )
+    if dedendum_factor <= fillet_factor:
+        raise ValueError("dedendum_factor must exceed fillet_factor")
     if not drive_start < drive_end:
         raise ValueError("drive_start must be less than drive_end")
     if period <= 0.0:
         raise ValueError("period must be positive")
-    if samples < 1024:
-        raise ValueError("samples must be at least 1024")
-    if padding_pitches < 2.5:
-        raise ValueError("padding_pitches must be at least 2.5")
-    if profile not in {"involute", "cycloidal"}:
-        raise ValueError("profile must be 'involute' or 'cycloidal'")
-    if not 0.0 <= cycloidal_rolling_factor <= 1.0:
-        raise ValueError("cycloidal_rolling_factor must be between 0 and 1")
-    if samples_per_radian < 20:
-        raise ValueError("samples_per_radian must be at least 20")
+    if samples < MIN_INPUT_SAMPLES:
+        raise ValueError(f"samples must be at least {MIN_INPUT_SAMPLES}")
+    if padding_pitches < MIN_PADDING_PITCHES:
+        raise ValueError(f"padding_pitches must be at least {MIN_PADDING_PITCHES:g}")
+    if samples_per_radian < MIN_SAMPLES_PER_RADIAN:
+        raise ValueError(
+            f"samples_per_radian must be at least {MIN_SAMPLES_PER_RADIAN}"
+        )
 
 
 def _write_samples(
@@ -161,8 +183,6 @@ def _run_generator(
     period: float,
     cycle_delta: float,
     open_: bool,
-    profile: str,
-    cycloidal_rolling_factor: float,
     samples_per_radian: int,
     output_root: Path,
     generator: str | Path | None,
@@ -193,8 +213,6 @@ def _run_generator(
             period=period,
             cycle_delta=cycle_delta,
             open_=open_,
-            profile=profile,
-            cycloidal_rolling_factor=cycloidal_rolling_factor,
             extra_arguments=extra_arguments,
         )
         result = generate_geometry(config, samples_per_radian)
@@ -241,21 +259,19 @@ def generate_from_transmission(
     *,
     name: str = "gear_pair",
     description: str | None = None,
-    teeth: int = 16,
-    module: float = 1.0,
-    pressure_angle_deg: float = 20.0,
-    addendum_factor: float = 1.0,
-    dedendum_factor: float = 1.2,
-    fillet_factor: float = 0.3,
+    teeth: int = DEFAULT_TEETH,
+    module: float = DEFAULT_MODULE,
+    pressure_angle_deg: float = DEFAULT_PRESSURE_ANGLE_DEG,
+    addendum_factor: float = DEFAULT_ADDENDUM_FACTOR,
+    dedendum_factor: float = DEFAULT_DEDENDUM_FACTOR,
+    fillet_factor: float = DEFAULT_FILLET_FACTOR,
     drive_start: float = 0.0,
     drive_end: float = 2.0 * math.pi,
     period: float = 2.0 * math.pi,
     open_: bool = False,
-    samples: int = 8192,
-    padding_pitches: float = 7.0,
-    profile: str = "involute",
-    cycloidal_rolling_factor: float = 0.35,
-    samples_per_radian: int = 110,
+    samples: int = DEFAULT_INPUT_SAMPLES,
+    padding_pitches: float = DEFAULT_PADDING_PITCHES,
+    samples_per_radian: int = DEFAULT_SAMPLES_PER_RADIAN,
     output_directory: str | Path = "out",
     generator: str | Path | None = None,
     render: bool = False,
@@ -282,8 +298,6 @@ def generate_from_transmission(
         period=period,
         samples=samples,
         padding_pitches=padding_pitches,
-        profile=profile,
-        cycloidal_rolling_factor=cycloidal_rolling_factor,
         samples_per_radian=samples_per_radian,
     )
     parsed = _parse_expression(expression)
@@ -310,7 +324,12 @@ def generate_from_transmission(
             derivative = sp.diff(parsed, PHI, order)
             start_value = float(sp.N(derivative.subs(PHI, domain_start)))
             end_value = float(sp.N(derivative.subs(PHI, domain_end)))
-            if not math.isclose(start_value, end_value, rel_tol=1e-7, abs_tol=1e-7):
+            if not math.isclose(
+                start_value,
+                end_value,
+                rel_tol=EXPRESSION_ENDPOINT_TOLERANCE,
+                abs_tol=EXPRESSION_ENDPOINT_TOLERANCE,
+            ):
                 raise ValueError(
                     f"Closed mode requires transmission derivative order {order} "
                     "to be periodic"
@@ -323,26 +342,15 @@ def generate_from_transmission(
         exact_driven_teeth = teeth * period / cycle_delta
         driven_teeth = round(exact_driven_teeth)
         if driven_teeth <= 0 or not math.isclose(
-            exact_driven_teeth, driven_teeth, rel_tol=1e-8, abs_tol=1e-8
+            exact_driven_teeth,
+            driven_teeth,
+            rel_tol=TOOTH_COUNT_ABS_TOLERANCE,
+            abs_tol=TOOTH_COUNT_ABS_TOLERANCE,
         ):
             raise ValueError(
                 "Closed mode requires teeth * period / cycle advance to be an "
                 "integer; adjust the drive tooth count or motion law"
             )
-        driven_cycle = period * driven_teeth / teeth
-        check_points = np.linspace(domain_start, domain_end, 257)
-        for order in range(1, 4):
-            derivative = sp.diff(parsed, PHI, order)
-            difference = sp.simplify(
-                derivative.subs(PHI, PHI + driven_cycle) - derivative
-            )
-            if difference != 0:
-                values = _evaluate(difference, check_points, (0,))[0]
-                if np.max(np.abs(values)) > 1e-7:
-                    raise ValueError(
-                        "Closed mode requires the motion derivatives to repeat "
-                        "over one driven-gear revolution"
-                    )
         sample_multiple = teeth // math.gcd(teeth, driven_teeth)
         sample_count = (
             (samples + sample_multiple - 1) // sample_multiple
@@ -350,7 +358,7 @@ def generate_from_transmission(
         phis = np.linspace(domain_start, domain_end, sample_count, endpoint=False)
 
     arrays = _evaluate(parsed, phis, (0, 1, 2, 3))
-    if np.any(arrays[1] <= 1e-9):
+    if np.any(arrays[1] <= MIN_MOTION_RATIO):
         raise ValueError(
             "The transmission derivative must stay strictly positive over the "
             "complete sampled domain"
@@ -384,8 +392,6 @@ def generate_from_transmission(
         period=period,
         cycle_delta=cycle_delta,
         open_=open_,
-        profile=profile,
-        cycloidal_rolling_factor=cycloidal_rolling_factor,
         samples_per_radian=samples_per_radian,
         output_root=output_root,
         generator=generator,
@@ -399,23 +405,21 @@ def generate_from_centrode(
     *,
     name: str = "centrode_pair",
     description: str | None = None,
-    teeth: int = 16,
-    module: float = 1.0,
-    pressure_angle_deg: float = 20.0,
-    addendum_factor: float = 1.0,
-    dedendum_factor: float = 1.2,
-    fillet_factor: float = 0.3,
+    teeth: int = DEFAULT_TEETH,
+    module: float = DEFAULT_MODULE,
+    pressure_angle_deg: float = DEFAULT_PRESSURE_ANGLE_DEG,
+    addendum_factor: float = DEFAULT_ADDENDUM_FACTOR,
+    dedendum_factor: float = DEFAULT_DEDENDUM_FACTOR,
+    fillet_factor: float = DEFAULT_FILLET_FACTOR,
     drive_start: float = 0.0,
     drive_end: float = 2.0 * math.pi,
     period: float = 2.0 * math.pi,
     open_: bool = False,
-    samples: int = 8192,
-    padding_pitches: float = 7.0,
+    samples: int = DEFAULT_INPUT_SAMPLES,
+    padding_pitches: float = DEFAULT_PADDING_PITCHES,
     reference_center_distance: float | None = None,
     target_cycle_delta: float = 2.0 * math.pi,
-    profile: str = "involute",
-    cycloidal_rolling_factor: float = 0.35,
-    samples_per_radian: int = 110,
+    samples_per_radian: int = DEFAULT_SAMPLES_PER_RADIAN,
     output_directory: str | Path = "out",
     generator: str | Path | None = None,
     render: bool = False,
@@ -441,8 +445,6 @@ def generate_from_centrode(
         period=period,
         samples=samples,
         padding_pitches=padding_pitches,
-        profile=profile,
-        cycloidal_rolling_factor=cycloidal_rolling_factor,
         samples_per_radian=samples_per_radian,
     )
     if reference_center_distance is not None and reference_center_distance <= 0.0:
@@ -467,7 +469,12 @@ def generate_from_centrode(
             derivative = sp.diff(parsed, PHI, order)
             start_value = float(sp.N(derivative.subs(PHI, domain_start)))
             end_value = float(sp.N(derivative.subs(PHI, domain_end)))
-            if not math.isclose(start_value, end_value, rel_tol=1e-7, abs_tol=1e-7):
+            if not math.isclose(
+                start_value,
+                end_value,
+                rel_tol=EXPRESSION_ENDPOINT_TOLERANCE,
+                abs_tol=EXPRESSION_ENDPOINT_TOLERANCE,
+            ):
                 raise ValueError(
                     f"Closed mode requires centrode derivative order {order} "
                     "to be periodic"
@@ -514,8 +521,6 @@ def generate_from_centrode(
         period=period,
         cycle_delta=target_cycle_delta,
         open_=open_,
-        profile=profile,
-        cycloidal_rolling_factor=cycloidal_rolling_factor,
         samples_per_radian=samples_per_radian,
         output_root=output_root,
         generator=generator,

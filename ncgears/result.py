@@ -17,12 +17,25 @@ from numpy.typing import NDArray
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
 
+from ._policy import (
+    DEFAULT_GIF_DPI,
+    DEFAULT_GIF_FPS,
+    DEFAULT_GIF_FRAMES,
+    OUTLINE_COORDINATE_COLUMNS,
+    SVG_MARGIN_FRACTION,
+    SVG_STROKE_WIDTH_FRACTION,
+    TABULAR_ARRAY_DIMENSIONS,
+)
+
 GearSelection = Literal["drive", "driven", "pair"]
 
 
 def _load_outline(path: Path) -> NDArray[np.float64]:
     values = np.loadtxt(path, delimiter=",", skiprows=1, ndmin=2)
-    if values.ndim != 2 or values.shape[1] != 2:
+    if (
+        values.ndim != TABULAR_ARRAY_DIMENSIONS
+        or values.shape[1] != OUTLINE_COORDINATE_COLUMNS
+    ):
         raise ValueError(f"Expected a two-column gear outline in {path}")
     return np.asarray(values, dtype=float)
 
@@ -126,9 +139,9 @@ class GearPair:
         self,
         output: str | Path | None = None,
         *,
-        frames: int = 72,
-        fps: int = 24,
-        dpi: int = 100,
+        frames: int = DEFAULT_GIF_FRAMES,
+        fps: int = DEFAULT_GIF_FPS,
+        dpi: int = DEFAULT_GIF_DPI,
         show_axes: bool = True,
         show_title: bool = True,
     ) -> Path:
@@ -166,11 +179,14 @@ class GearPair:
         all_points = np.vstack(tuple(outlines.values()))
         minimum = np.min(all_points, axis=0)
         maximum = np.max(all_points, axis=0)
-        span = np.maximum(maximum - minimum, 1e-9)
-        margin = 0.04 * float(max(span))
+        span = maximum - minimum
+        maximum_span = float(max(span))
+        if not maximum_span > 0.0:
+            raise ValueError("Cannot export a zero-size outline")
+        margin = SVG_MARGIN_FRACTION * maximum_span
         width = float(span[0] + 2.0 * margin)
         height = float(span[1] + 2.0 * margin)
-        line_width = stroke_width or 0.002 * float(max(span))
+        line_width = stroke_width or SVG_STROKE_WIDTH_FRACTION * maximum_span
         colors = {"drive": "#245b82", "driven": "#a85e21"}
 
         path = Path(output).expanduser()

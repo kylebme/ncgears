@@ -9,10 +9,10 @@ __all__ = [
     "GearPair",
     "GenerationError",
     "GeneratorNotFoundError",
-    "ncgearsError",
     "generate",
     "generate_from_centrode",
     "generate_from_transmission",
     "native_generator",
+    "ncgearsError",
 ]
 __version__ = "0.2.1"

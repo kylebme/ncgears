@@ -8,6 +8,15 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from ._policy import (
+    DEFAULT_GIF_DPI,
+    DEFAULT_GIF_FPS,
+    DEFAULT_GIF_FRAMES,
+    FLOAT_COMPARISON_ULPS,
+    MIN_GIF_FRAMES,
+    RENDER_MARGIN_FRACTION,
+)
+
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
 
@@ -21,9 +30,7 @@ def _load_motion(pair: GearPair) -> tuple[float, float, Callable[[float], float]
 
     metadata = pair.metadata
     closed = metadata.get("topology", "closed") == "closed"
-    if not closed and (
-        "active_start" not in metadata or "active_end" not in metadata
-    ):
+    if not closed and ("active_start" not in metadata or "active_end" not in metadata):
         raise ValueError(
             "Open gear-pair metadata does not record its active interval; "
             "regenerate the pair before plotting its motion."
@@ -32,9 +39,7 @@ def _load_motion(pair: GearPair) -> tuple[float, float, Callable[[float], float]
     centrode_path = pair.directory / "centrode.csv"
 
     if transmission_path.exists():
-        samples = np.loadtxt(
-            transmission_path, delimiter=",", skiprows=1, ndmin=2
-        )
+        samples = np.loadtxt(transmission_path, delimiter=",", skiprows=1, ndmin=2)
         phi = samples[:, 0]
         psi = samples[:, 1]
         derivative = samples[:, 2]
@@ -56,7 +61,10 @@ def _load_motion(pair: GearPair) -> tuple[float, float, Callable[[float], float]
                 )
             )
             endpoint = domain_start + period
-            if phi[-1] < endpoint - 1e-10 * max(1.0, abs(period)):
+            tolerance = (
+                FLOAT_COMPARISON_ULPS * np.finfo(float).eps * max(1.0, abs(period))
+            )
+            if phi[-1] < endpoint - tolerance:
                 phi = np.append(phi, endpoint)
                 psi = np.append(psi, psi[0] + cycle_delta)
                 derivative = np.append(derivative, derivative[0])
@@ -80,13 +88,14 @@ def _load_motion(pair: GearPair) -> tuple[float, float, Callable[[float], float]
         )
         if closed:
             endpoint = domain_start + period
-            if phi[-1] < endpoint - 1e-10 * max(1.0, abs(period)):
+            tolerance = (
+                FLOAT_COMPARISON_ULPS * np.finfo(float).eps * max(1.0, abs(period))
+            )
+            if phi[-1] < endpoint - tolerance:
                 phi = np.append(phi, endpoint)
                 radius = np.append(radius, radius[0])
 
-        reference_distance = float(
-            metadata["centrode_reference_center_distance"]
-        )
+        reference_distance = float(metadata["centrode_reference_center_distance"])
         ratio = radius / (reference_distance - radius)
         ratio_spline = CubicSpline(
             phi,
@@ -112,7 +121,7 @@ def _plot_extents(pair: GearPair) -> tuple[float, float, float]:
 
     drive_radius = float(np.max(np.linalg.norm(pair.drive_outline, axis=1)))
     driven_radius = float(np.max(np.linalg.norm(pair.driven_outline, axis=1)))
-    margin = 0.08 * max(
+    margin = RENDER_MARGIN_FRACTION * max(
         pair.center_distance + drive_radius + driven_radius,
         1.0,
     )
@@ -229,6 +238,7 @@ def render_pair(pair: GearPair, output: str | Path) -> Path:
 
     try:
         import matplotlib.pyplot as plt
+        from matplotlib.patches import Polygon
     except ImportError as error:
         raise ImportError(
             "Rendering requires Matplotlib. Install it with "
@@ -241,10 +251,33 @@ def render_pair(pair: GearPair, output: str | Path) -> Path:
     driven = pair.placed_driven_outline
 
     figure, axis = plt.subplots(figsize=(10, 6), dpi=180)
-    axis.fill(drive[:, 0], drive[:, 1], color="#8eb6d8", alpha=0.82)
-    axis.plot(drive[:, 0], drive[:, 1], color="#15324b", linewidth=0.7)
-    axis.fill(driven[:, 0], driven[:, 1], color="#e4b07a", alpha=0.82)
-    axis.plot(driven[:, 0], driven[:, 1], color="#6b3718", linewidth=0.7)
+    drive_patch = Polygon(
+        drive,
+        closed=True,
+        facecolor="#8eb6d8",
+        edgecolor="#15324b",
+        linewidth=0.7,
+        alpha=0.82,
+    )
+    driven_patch = Polygon(
+        driven,
+        closed=True,
+        facecolor="#e4b07a",
+        edgecolor="#6b3718",
+        linewidth=0.7,
+        alpha=0.82,
+    )
+    # Limits are known from the input arrays. add_artist avoids Matplotlib
+    # traversing every outline vertex merely to rediscover those bounds.
+    axis.add_artist(drive_patch)
+    axis.add_artist(driven_patch)
+    all_points = np.vstack((drive, driven))
+    minimum = np.min(all_points, axis=0)
+    maximum = np.max(all_points, axis=0)
+    span = maximum - minimum
+    margin = 0.05 * np.maximum(span, np.finfo(float).eps)
+    axis.set_xlim(minimum[0] - margin[0], maximum[0] + margin[0])
+    axis.set_ylim(minimum[1] - margin[1], maximum[1] + margin[1])
     axis.plot(
         [0.0, pair.center_distance],
         [0.0, 0.0],
@@ -269,16 +302,16 @@ def render_pair_gif(
     pair: GearPair,
     output: str | Path,
     *,
-    frames: int = 72,
-    fps: int = 24,
-    dpi: int = 100,
+    frames: int = DEFAULT_GIF_FRAMES,
+    fps: int = DEFAULT_GIF_FPS,
+    dpi: int = DEFAULT_GIF_DPI,
     show_axes: bool = True,
     show_title: bool = True,
 ) -> Path:
     """Render the generated gear pair moving through its active interval."""
 
-    if frames < 2:
-        raise ValueError("frames must be at least 2")
+    if frames < MIN_GIF_FRAMES:
+        raise ValueError(f"frames must be at least {MIN_GIF_FRAMES}")
     if fps <= 0:
         raise ValueError("fps must be positive")
     if dpi <= 0:
@@ -286,9 +319,9 @@ def render_pair_gif(
 
     try:
         import matplotlib.pyplot as plt
-        from matplotlib.animation import FuncAnimation, PillowWriter
         from matplotlib.patches import Polygon
         from matplotlib.transforms import Affine2D
+        from PIL import Image
     except ImportError as error:
         raise ImportError(
             "GIF rendering requires Matplotlib and Pillow. Install them with "
@@ -330,8 +363,10 @@ def render_pair_gif(
         linewidth=0.8,
         alpha=0.88,
     )
-    axis.add_patch(drive_patch)
-    axis.add_patch(driven_patch)
+    # The limits are set explicitly below, so avoid the O(vertices) automatic
+    # data-limit scan performed by add_patch.
+    axis.add_artist(drive_patch)
+    axis.add_artist(driven_patch)
     axis.plot(
         [0.0, pair.center_distance],
         [0.0, 0.0],
@@ -353,8 +388,7 @@ def render_pair_gif(
         axis.set_axis_off()
     if show_title:
         axis.set_title(
-            f"{pair.metadata['name']}: "
-            f"{pair.drive_teeth}:{pair.driven_teeth} teeth"
+            f"{pair.metadata['name']}: {pair.drive_teeth}:{pair.driven_teeth} teeth"
         )
     if show_axes or show_title:
         figure.tight_layout()
@@ -366,22 +400,36 @@ def render_pair_gif(
         driven_angle = -driven_motion(float(phi))
         drive_patch.set_transform(Affine2D().rotate(drive_angle) + axis.transData)
         driven_patch.set_transform(
-            Affine2D()
-            .rotate(driven_angle)
-            .translate(pair.center_distance, 0.0)
+            Affine2D().rotate(driven_angle).translate(pair.center_distance, 0.0)
             + axis.transData
         )
         return drive_patch, driven_patch
 
-    animation = FuncAnimation(
-        figure,
-        update,
-        frames=phases,
-        interval=1000.0 / fps,
-        blit=True,
-    )
     try:
-        animation.save(destination, writer=PillowWriter(fps=fps), dpi=dpi)
+        rendered_frames: list[Image.Image] = []
+        for phase in phases:
+            update(float(phase))
+            figure.canvas.draw()
+            size = figure.canvas.get_width_height()
+            frame = Image.frombuffer(
+                "RGBA",
+                size,
+                figure.canvas.buffer_rgba(),
+                "raw",
+                "RGBA",
+                0,
+                1,
+            )
+            # The canvas is reused for the next pose. Conversion both improves
+            # GIF palette selection and gives this frame independent storage.
+            rendered_frames.append(frame.convert("RGB"))
+        rendered_frames[0].save(
+            destination,
+            save_all=True,
+            append_images=rendered_frames[1:],
+            duration=int(1000 / fps),
+            loop=0,
+        )
     finally:
         plt.close(figure)
     return destination.resolve()

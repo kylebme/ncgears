@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import math
 from pathlib import Path
@@ -47,6 +48,19 @@ def _fixture_pair(directory: Path) -> GearPair:
     }
     (directory / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
     return GearPair.load(directory)
+
+
+def test_removed_profile_backends_are_not_public_options() -> None:
+    for frontend in (
+        ncgears.generate,
+        ncgears.generate_from_transmission,
+        ncgears.generate_from_centrode,
+    ):
+        parameters = inspect.signature(frontend).parameters
+        assert "profile" not in parameters
+        assert "cycloidal_rolling_factor" not in parameters
+
+    assert "--profile" not in build_parser().format_help()
 
 
 def test_result_loads_and_exports_cad_formats(tmp_path: Path) -> None:
