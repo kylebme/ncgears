@@ -127,9 +127,11 @@ Every input uses the hybrid analytical involute engine. It evaluates the
 straight-rack flank and rounded rack-tip envelope equations without constructing
 or sweeping a complete rack solid, so remote rack material cannot erase a
 pitch-curve concavity. Exact addendum and dedendum offsets complete each tooth.
-An independent rolling pass removes measured non-working root interference
-while refusing to alter material outside either pitch-side root region. Finite
-open profiles clip each analytical curve in rolling-arc
+An independent rolling pass uses each opposing gear as a cutter to remove
+measured non-working interference. On closed gears, exact regular flank spans
+and the connected support cores are guarded; other material, including
+nonconvex cusp loops outside the pitch curve, may be removed. Finite open
+profiles retain pitch-side-only trimming and clip each analytical curve in rolling-arc
 parameter space, then follow one quarter of the centrode back across the inner
 boundary. Source-domain padding is used only to solve endpoint teeth; it cannot
 change or clip the finished body.
@@ -169,16 +171,17 @@ intersection. A successful result includes checks for:
 - sampled whole-cycle solid interference
 - contact motion recovered from the finished outlines
 - analytic envelope/tangency, intersection, join, and chord residuals
-- non-working root rolling clearance without interior flank modification
+- cusp-free, exposed protected flanks with sampled conjugate contact coverage
+- iterative opposing-gear undercut generation without protected-flank cuts
 - root radius, tip thickness, and centrode curvature
 - drive-outline fidelity to the requested centrode
 - sliding-velocity and undercut diagnostics
 
 `metadata.json` reports
 `generation_backend: "hybrid_analytic_involute"`, flank sample count, maximum
-envelope residual, maximum envelope-tangency residual, chord error, and rolling
-root-trim diagnostics. Pair verification uses a bounded thread pool of at most
-eight workers.
+envelope residual, maximum envelope-tangency residual, chord error, protected
+flank diagnostics, and iterative rolling-cut diagnostics. Pair verification
+uses a bounded thread pool of at most eight workers.
 
 These geometry checks are not load-rating or manufacturing certification.
 

@@ -17,6 +17,7 @@ from ncgears._policy import (
     INTERSECTION_RESIDUAL_FACTOR,
     MAX_SUPPORT_RADIUS_PITCH_FACTOR,
     MIN_FLANK_CURVE_SAMPLES,
+    PROTECTED_CONTACT_RESIDUAL_FACTOR,
     ROLLING_MIN_PHASES,
     ROLLING_STAGGER_OFFSETS,
     ROOT_SUPPORT_RADIUS_PITCH_FACTOR,
@@ -38,8 +39,18 @@ def _assert_verified_pair(pair: ncgears.GearPair) -> None:
     )
     assert pair.metadata["nonworking_closure"] == (
         "analytic_rack_tip_and_dedendum_envelopes"
+        if pair.metadata["hybrid_undercut_count"] == 0
+        else "analytic_fillets_with_opposing_gear_undercuts"
     )
-    assert pair.metadata["requested_fillet_applied_to_closure"] is True
+    assert pair.metadata["requested_fillet_applied_to_closure"] is (
+        pair.metadata["hybrid_undercut_count"] == 0
+    )
+    assert pair.metadata["fillet_closure_mode"] == (
+        "analytic_only"
+        if pair.metadata["hybrid_undercut_count"] == 0
+        else "analytic_with_hybrid_opposing_cutter"
+    )
+    assert pair.metadata["undercut_detection_method"] == "exact_per_flank_cusp_equation"
     assert pair.metadata["maximum_join_gap"] < (
         INTERSECTION_RESIDUAL_FACTOR * pair.metadata["module"]
     )
@@ -62,6 +73,28 @@ def _assert_verified_pair(pair: ncgears.GearPair) -> None:
         * ANALYTIC_CHORD_ACCEPTANCE_SLACK
         * pair.metadata["module"]
     )
+    assert pair.metadata["protected_flank_count"] > 0
+    assert pair.metadata["minimum_flank_regular_factor"] > 0.0
+    assert pair.metadata["maximum_protected_flank_boundary_error"] < (
+        pair.metadata["maximum_analytic_chord_error"]
+        + 2.0 * ANALYTIC_CHORD_TOLERANCE_FACTOR * pair.metadata["module"]
+    )
+    assert pair.metadata["minimum_protected_contact_pairs"] >= 0
+    assert 0.0 < pair.metadata["protected_contact_coverage_fraction"] <= 1.0
+    assert pair.metadata["maximum_protected_contact_residual"] < (
+        PROTECTED_CONTACT_RESIDUAL_FACTOR * pair.metadata["module"]
+    )
+    assert pair.metadata["protected_contact_verification_phase_count"] >= (
+        VERIFICATION_MIN_CLOSED_PHASES
+        if pair.metadata["topology"] == "closed"
+        else VERIFICATION_MIN_OPEN_PHASES
+    )
+    assert pair.metadata["rolling_nonworking_trim_scope"] == (
+        "all_unprotected_tooth_material"
+        if pair.metadata["topology"] == "closed"
+        else "pitch_side_roots"
+    )
+    assert pair.metadata["rolling_nonworking_trim_pass_count"] >= 1
     assert pair.metadata["verification_method"] == "staggered_sampled_phase_grid"
     assert pair.metadata["verification_stagger_grid_count"] == len(
         ROLLING_STAGGER_OFFSETS
@@ -325,7 +358,7 @@ def test_open_quadratic_uses_parameter_clipped_padding_invariant_boundary(
     ]
     for pair in pairs:
         _assert_verified_pair(pair)
-        assert pair.metadata["rolling_nonworking_trim_scope"] == ("pitch_side_roots")
+        assert pair.metadata["rolling_nonworking_trim_scope"] == "pitch_side_roots"
         assert pair.metadata["rolling_nonworking_removed_area"] < 0.1
 
         # The open backing curve is the historical analytical closure:
@@ -404,3 +437,28 @@ def test_deep_nonconvex_centrode_uses_analytic_involute_form(
         pair.metadata["drive_centrode_outline_distance"]
         <= pair.metadata["centrode_fidelity_tolerance"]
     )
+
+
+def test_nonconvex_cusps_become_hybrid_opposing_gear_undercuts(
+    tmp_path: Path,
+) -> None:
+    pair = ncgears.generate(
+        "phi + 0.0625*sin(4*phi)",
+        name="nonconvex_hybrid_undercut",
+        teeth=36,
+        samples=1024,
+        samples_per_radian=20,
+        output_directory=tmp_path,
+    )
+
+    _assert_verified_pair(pair)
+    assert pair.metadata["centrodes_are_convex"] is False
+    assert pair.metadata["hybrid_undercut_count"] == 8
+    assert pair.metadata["maximum_hybrid_connector_length"] > 0.0
+    assert (
+        pair.metadata["analytic_undercut_count"]
+        >= (pair.metadata["hybrid_undercut_count"])
+    )
+    assert pair.metadata["rolling_nonworking_trim_pass_count"] >= 2
+    assert pair.metadata["rolling_nonworking_removed_area"] > 0.0
+    assert pair.metadata["minimum_protected_contact_pairs"] >= 1

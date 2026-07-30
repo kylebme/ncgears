@@ -192,8 +192,7 @@ def plot_pair(
     axis.grid(True, color="#d7dce2", linewidth=0.5)
     axis.set_facecolor("#fafbfc")
     axis.set_title(
-        f"{pair.metadata['name']}: "
-        f"{pair.drive_teeth}:{pair.driven_teeth} teeth"
+        f"{pair.metadata['name']}: {pair.drive_teeth}:{pair.driven_teeth} teeth"
     )
     axis.set_xlabel("millimetres")
     axis.set_ylabel("millimetres")
@@ -210,13 +209,9 @@ def plot_pair(
     def update(phi: float) -> None:
         drive_angle = float(phi - active_start)
         driven_angle = -driven_motion(float(phi))
-        drive_patch.set_transform(
-            Affine2D().rotate(drive_angle) + axis.transData
-        )
+        drive_patch.set_transform(Affine2D().rotate(drive_angle) + axis.transData)
         driven_patch.set_transform(
-            Affine2D()
-            .rotate(driven_angle)
-            .translate(pair.center_distance, 0.0)
+            Affine2D().rotate(driven_angle).translate(pair.center_distance, 0.0)
             + axis.transData
         )
         figure.canvas.draw_idle()
@@ -410,18 +405,10 @@ def render_pair_gif(
         for phase in phases:
             update(float(phase))
             figure.canvas.draw()
-            size = figure.canvas.get_width_height()
-            frame = Image.frombuffer(
-                "RGBA",
-                size,
-                figure.canvas.buffer_rgba(),
-                "raw",
-                "RGBA",
-                0,
-                1,
-            )
-            # The canvas is reused for the next pose. Conversion both improves
-            # GIF palette selection and gives this frame independent storage.
+            # On high-DPI backends, get_width_height() can report logical
+            # rather than physical pixels. Reading the array shape avoids
+            # cropping each Retina canvas to its unchanged upper-left quarter.
+            frame = Image.fromarray(np.asarray(figure.canvas.buffer_rgba()).copy())
             rendered_frames.append(frame.convert("RGB"))
         rendered_frames[0].save(
             destination,

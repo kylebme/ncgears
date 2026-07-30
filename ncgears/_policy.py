@@ -96,12 +96,15 @@ FLANK_OFFSET_SOLVER_MAX_EVALUATIONS = 100
 INTERSECTION_CONTACT_EXCLUSION_PITCHES = 1e-3
 INTERSECTION_CANDIDATE_OFFSET_WEIGHT = 0.25
 UNDERCUT_FLANK_SEARCH_PITCHES = 2.0
-UNDERCUT_CURVATURE_SLACK_FACTOR = 1e-11
 
 CUSP_INITIAL_SAMPLES = 128
 CUSP_MAX_SAMPLES = 4096
 CUSP_EQUATION_TOLERANCE = 1e-12
 CUSP_PARAMETER_DEDUP_FACTOR = 1e-8
+# A hybrid undercut that cannot be joined to the analytic rack-tip fillet
+# starts on the regular, tip-side component of the flank this far from the
+# nearest cusp.  The value is an arc-length factor of module.
+HYBRID_CUSP_CLEARANCE_FACTOR = 1e-4
 
 # Adaptive tessellation. Working flanks receive more initial samples because
 # their chord certificate is part of the result contract.
@@ -144,6 +147,13 @@ CONTACT_SEARCH_INITIAL_ANGLE = 1e-5
 CONTACT_SEARCH_MAX_ANGLE = math.radians(5.0)
 CONTACT_SEARCH_ANGLE_TOLERANCE = 1e-9
 TRIM_BUFFER_QUADRANT_SEGMENTS = 2
+# One-sided material guards protect retained analytic flanks during mutual
+# rolling cuts.  Make the guard wider than the Boolean trim clearance so the
+# latter can never reach a retained flank through roundoff.
+PROTECTED_FLANK_GUARD_CHORD_FACTORS = 4.0
+PROTECTED_CONTACT_RESIDUAL_FACTOR = 1e-6
+ROLLING_MAX_PASSES = 8
+ROLLING_CONVERGENCE_AREA_FACTOR = 1e-9
 
 # Broad topology/fidelity guards. These are policy thresholds, not numerical
 # roundoff tolerances, and should be revisited with manufacturing validation.

@@ -51,6 +51,7 @@ from ._policy import (
     FLANK_OFFSET_SOLVER_MAX_EVALUATIONS,
     FLOAT_COMPARISON_ULPS,
     GEOMETRY_LENGTH_TOLERANCE_FACTOR,
+    HYBRID_CUSP_CLEARANCE_FACTOR,
     INTEGRATION_INTERVAL_COUNT,
     INTERSECTION_CANDIDATE_OFFSET_WEIGHT,
     INTERSECTION_CONTACT_EXCLUSION_PITCHES,
@@ -89,7 +90,11 @@ from ._policy import (
     PERIODIC_VALUE_REL_TOLERANCE,
     PITCH_MASK_BUFFER_QUADRANT_SEGMENTS,
     PITCH_MASK_SUPPORT_RADIUS_PITCH_FACTOR,
+    PROTECTED_CONTACT_RESIDUAL_FACTOR,
+    PROTECTED_FLANK_GUARD_CHORD_FACTORS,
     RACK_MIN_TIP_THICKNESS_FACTOR,
+    ROLLING_CONVERGENCE_AREA_FACTOR,
+    ROLLING_MAX_PASSES,
     ROLLING_MIN_PHASES,
     ROLLING_PHASES_PER_TOOTH,
     ROLLING_STAGGER_OFFSETS,
@@ -100,7 +105,6 @@ from ._policy import (
     TABULAR_ARRAY_DIMENSIONS,
     TOOTH_COUNT_ABS_TOLERANCE,
     TRIM_BUFFER_QUADRANT_SEGMENTS,
-    UNDERCUT_CURVATURE_SLACK_FACTOR,
     UNDERCUT_FLANK_SEARCH_PITCHES,
     VERIFICATION_MIN_CLOSED_PHASES,
     VERIFICATION_MIN_OPEN_PHASES,
@@ -182,6 +186,17 @@ class _AnalyticFlankGeometry:
     addendum_tip_arc: float
     intersection_residual: float
     undercut: bool
+    hybrid_undercut: bool
+
+
+@dataclass(frozen=True)
+class _ProtectedFlankSpan:
+    driven: bool
+    phase: float
+    sign: int
+    start_arc: float
+    end_arc: float
+    tip_arc: float
 
 
 @dataclass(frozen=True)
@@ -194,8 +209,12 @@ class _AnalyticGearResult:
     maximum_chord_error: float
     maximum_intersection_residual: float
     maximum_join_gap: float
+    maximum_hybrid_connector_length: float
     maximum_fillet_root_residual: float
+    minimum_flank_regular_factor: float
     undercut_count: int
+    hybrid_undercut_count: int
+    protected_flanks: tuple[_ProtectedFlankSpan, ...]
 
 
 class _QuinticSeries:
@@ -455,6 +474,7 @@ def _outline(polygon: Polygon, tolerance: float) -> FloatArray:
     points = np.asarray(polygon.exterior.coords, dtype=float)
     if len(points) < MIN_CLOSED_RING_COORDINATE_COUNT:
         raise RuntimeError("Geometry operation left fewer than three boundary points")
+    original_points = points.copy()
 
     # GEOS can retain nearly coincident and almost-collinear overlay vertices.
     points = points[:-1]
@@ -483,10 +503,7 @@ def _outline(polygon: Polygon, tolerance: float) -> FloatArray:
         removable = (
             forward
             & (lengths > 0.0)
-            & (
-                twice_area
-                < tolerance * OUTLINE_COLLINEAR_TOLERANCE_FRACTION * lengths
-            )
+            & (twice_area < tolerance * OUTLINE_COLLINEAR_TOLERANCE_FRACTION * lengths)
         )
         changed = bool(np.any(removable))
         keep = ~removable
@@ -494,6 +511,11 @@ def _outline(polygon: Polygon, tolerance: float) -> FloatArray:
     if len(points) < MIN_POLYGON_VERTEX_COUNT:
         raise RuntimeError("Geometry cleanup removed the complete boundary")
     points = np.vstack((points, points[0]))
+    if not Polygon(points[:-1]).is_valid:
+        # Removing an almost-collinear vertex can still close a very narrow
+        # Boolean feature across its opposite edge.  The GEOS exterior supplied
+        # on entry is valid, so retain it when simplification changes topology.
+        points = original_points
     if _signed_area(points) < 0.0:
         points = points[::-1].copy()
     return points
@@ -510,9 +532,7 @@ def _transform_outline(
     sine = math.sin(angle)
     transformed = np.empty_like(vertices)
     transformed[:, 0] = cosine * vertices[:, 0] - sine * vertices[:, 1] + translate_x
-    transformed[:, 1] = (
-        sine * vertices[:, 0] + cosine * vertices[:, 1] + translate_y
-    )
+    transformed[:, 1] = sine * vertices[:, 0] + cosine * vertices[:, 1] + translate_y
     return Polygon(transformed)
 
 
@@ -1250,21 +1270,21 @@ class _GearGenerator:
             ),
         )
 
-    def _analytic_singular_arc(
+    def _analytic_singular_arcs(
         self,
         *,
         driven: bool,
         tooth_phase: float,
         sign: int,
-        contact_arc: float,
-        flank_tip_arc: float,
-    ) -> float | None:
-        """Locate the first cusp on the retained working-flank interval."""
+        start_arc: float,
+        end_arc: float,
+    ) -> tuple[float, ...]:
+        """Locate every cusp on a candidate working-flank interval."""
 
         pitch = math.pi * self.config.module
         phase_arc = tooth_phase * pitch
-        low = min(contact_arc, flank_tip_arc)
-        high = max(contact_arc, flank_tip_arc)
+        low = min(start_arc, end_arc)
+        high = max(start_arc, end_arc)
 
         def equation(common_arc: float) -> float:
             phi = self._phi_from_common_arc(np.asarray([common_arc]))[0]
@@ -1355,6 +1375,30 @@ class _GearGenerator:
             previous_roots = roots
             sample_count = min(2 * sample_count, CUSP_MAX_SAMPLES)
 
+        return tuple(roots)
+
+    def _analytic_singular_arc(
+        self,
+        *,
+        driven: bool,
+        tooth_phase: float,
+        sign: int,
+        contact_arc: float,
+        flank_tip_arc: float,
+    ) -> float | None:
+        """Return the cusp nearest the nominal fillet contact, if any.
+
+        Kept as a small compatibility wrapper for diagnostics.  Construction
+        uses all roots returned by :meth:`_analytic_singular_arcs`.
+        """
+
+        roots = self._analytic_singular_arcs(
+            driven=driven,
+            tooth_phase=tooth_phase,
+            sign=sign,
+            start_arc=contact_arc,
+            end_arc=flank_tip_arc,
+        )
         if not roots:
             return None
         return min(roots, key=lambda root: abs(root - contact_arc))
@@ -1476,28 +1520,15 @@ class _GearGenerator:
                 height=self.addendum,
             )
         )
-        singular_arc = self._analytic_singular_arc(
+        singular_arcs = self._analytic_singular_arcs(
             driven=driven,
             tooth_phase=tooth_phase,
             sign=sign,
-            contact_arc=contact_arc,
-            flank_tip_arc=flank_tip_arc,
+            start_arc=contact_arc,
+            end_arc=flank_tip_arc,
         )
-        if singular_arc is None:
-            free = True
-        else:
-            singular_phi = self._phi_from_common_arc(np.asarray([singular_arc]))
-            singular_curvature = float(
-                self._driven_curvature(singular_phi)[0]
-                if driven
-                else self._drive_curvature(singular_phi)[0]
-            )
-            curvature_slack = UNDERCUT_CURVATURE_SLACK_FACTOR / self.config.module
-            free = (
-                singular_curvature <= self.curvature_limit + curvature_slack
-                if driven
-                else -singular_curvature <= self.curvature_limit + curvature_slack
-            )
+        free = not singular_arcs
+        hybrid_undercut = False
         transition_residual = 0.0
         flank_transition_arc = contact_arc
         fillet_transition_arc = contact_arc
@@ -1558,19 +1589,65 @@ class _GearGenerator:
                 or abs(intersection[1] - contact_arc)
                 > INTERSECTION_CONTACT_EXCLUSION_PITCHES * pitch
             ]
-            if not nontrivial:
-                member = "driven" if driven else "drive"
-                raise RuntimeError(
-                    f"Could not resolve {member} undercut transition for tooth "
-                    f"{tooth_phase:g}, sign {sign}"
+            regular_intersections = [
+                intersection
+                for intersection in nontrivial
+                if not self._analytic_singular_arcs(
+                    driven=driven,
+                    tooth_phase=tooth_phase,
+                    sign=sign,
+                    start_arc=intersection[0],
+                    end_arc=flank_tip_arc,
                 )
-            selected = min(
-                nontrivial,
-                key=lambda intersection: abs(intersection[0] - float(singular_arc)),
+            ]
+            if regular_intersections:
+                selected = min(
+                    regular_intersections,
+                    key=lambda intersection: min(
+                        abs(intersection[0] - singular) for singular in singular_arcs
+                    ),
+                )
+                flank_transition_arc = selected[0]
+                fillet_transition_arc = selected[1]
+                transition_residual = selected[2]
+            else:
+                # The rounded rack-tip branch cannot provide a regular
+                # transition.  Preserve only the tip-side regular component;
+                # the gap to the nominal fillet becomes sacrificial stock for
+                # the opposing-gear rolling cutter.
+                singular_arc = min(
+                    singular_arcs,
+                    key=lambda singular: abs(singular - flank_tip_arc),
+                )
+                direction_to_tip = math.copysign(1.0, flank_tip_arc - singular_arc)
+                clearance = HYBRID_CUSP_CLEARANCE_FACTOR * self.config.module
+                flank_transition_arc = singular_arc + direction_to_tip * clearance
+                if not (
+                    min(singular_arc, flank_tip_arc)
+                    < flank_transition_arc
+                    < max(singular_arc, flank_tip_arc)
+                ):
+                    member = "driven" if driven else "drive"
+                    raise RuntimeError(
+                        f"{member.capitalize()} flank cusp leaves no regular "
+                        f"working interval for tooth {tooth_phase:g}, sign {sign}"
+                    )
+                fillet_transition_arc = contact_arc
+                hybrid_undercut = True
+
+        retained_singular_arcs = self._analytic_singular_arcs(
+            driven=driven,
+            tooth_phase=tooth_phase,
+            sign=sign,
+            start_arc=flank_transition_arc,
+            end_arc=flank_tip_arc,
+        )
+        if retained_singular_arcs:
+            member = "driven" if driven else "drive"
+            raise RuntimeError(
+                f"{member.capitalize()} retained working flank contains a cusp "
+                f"for tooth {tooth_phase:g}, sign {sign}"
             )
-            flank_transition_arc = selected[0]
-            fillet_transition_arc = selected[1]
-            transition_residual = selected[2]
 
         return _AnalyticFlankGeometry(
             phase=tooth_phase,
@@ -1582,6 +1659,7 @@ class _GearGenerator:
             addendum_tip_arc=addendum_tip_arc,
             intersection_residual=max(transition_residual, tip_residual),
             undercut=not free,
+            hybrid_undercut=hybrid_undercut,
         )
 
     def _sample_analytic_curve(
@@ -1634,7 +1712,7 @@ class _GearGenerator:
         driven: bool,
         geometry: _AnalyticFlankGeometry,
         samples_per_radian: int,
-    ) -> tuple[NDArray[np.complex128], int, float, float, float]:
+    ) -> tuple[NDArray[np.complex128], int, float, float, float, float]:
         """Sample and certify one exact generalized-involute working flank."""
 
         curve = lambda values: self._analytic_involute_points(
@@ -1697,27 +1775,29 @@ class _GearGenerator:
             * direction
         )
         generator_tangent = 1j * midpoint_tangent * direction
-        regular = np.abs(derivative) > ANALYTIC_REGULAR_DERIVATIVE_TOLERANCE
-        if np.any(regular):
-            normalized_generator = generator_tangent[regular] / np.abs(
-                generator_tangent[regular]
+        derivative_magnitude = np.abs(derivative)
+        minimum_regular_factor = float(np.min(derivative_magnitude))
+        if minimum_regular_factor <= ANALYTIC_REGULAR_DERIVATIVE_TOLERANCE:
+            member = "driven" if driven else "drive"
+            raise RuntimeError(
+                f"{member.capitalize()} retained working flank is singular or "
+                f"numerically unresolved for tooth {geometry.phase:g}, "
+                f"sign {geometry.sign}"
             )
-            normalized_derivative = derivative[regular] / np.abs(derivative[regular])
-            tangency_residual = float(
-                np.max(
-                    np.abs(
-                        np.imag(np.conj(normalized_generator) * normalized_derivative)
-                    )
-                )
+        normalized_generator = generator_tangent / np.abs(generator_tangent)
+        normalized_derivative = derivative / derivative_magnitude
+        tangency_residual = float(
+            np.max(
+                np.abs(np.imag(np.conj(normalized_generator) * normalized_derivative))
             )
-        else:
-            tangency_residual = 0.0
+        )
         return (
             points,
             sample_count,
             envelope_residual,
             tangency_residual,
             chord_error,
+            minimum_regular_factor,
         )
 
     def _analytic_root_blank(
@@ -1783,8 +1863,12 @@ class _GearGenerator:
         maximum_chord_error = 0.0
         maximum_intersection_residual = 0.0
         maximum_join_gap = 0.0
+        maximum_hybrid_connector_length = 0.0
         maximum_fillet_root_residual = 0.0
+        minimum_flank_regular_factor = math.inf
         undercut_count = 0
+        hybrid_undercut_count = 0
+        protected_flanks: list[_ProtectedFlankSpan] = []
 
         for tooth_phase, sign in phase_sides:
             geometry = self._analytic_flank_geometry(
@@ -1815,12 +1899,19 @@ class _GearGenerator:
             # Closed profiles evaluate phase ``teeth`` as a periodic copy of
             # phase zero so the final body can join the first.  Keep that
             # geometry for arrangement, but do not count its two flanks twice.
-            if geometry.undercut and (not self.closed or tooth_phase < teeth):
+            physical_flank = (
+                tooth_phase < teeth if self.closed else tooth_phase < teeth + 0.5
+            )
+            if geometry.undercut and physical_flank:
                 undercut_count += 1
-            flank, count, envelope, tangency, chord = self._sample_analytic_flank(
-                driven=driven,
-                geometry=geometry,
-                samples_per_radian=samples_per_radian,
+            if geometry.hybrid_undercut and physical_flank:
+                hybrid_undercut_count += 1
+            flank, count, envelope, tangency, chord, regular_factor = (
+                self._sample_analytic_flank(
+                    driven=driven,
+                    geometry=geometry,
+                    samples_per_radian=samples_per_radian,
+                )
             )
             flanks[tooth_phase, sign] = flank
             total_samples += count
@@ -1828,6 +1919,31 @@ class _GearGenerator:
             maximum_envelope_residual = max(maximum_envelope_residual, envelope)
             maximum_tangency_residual = max(maximum_tangency_residual, tangency)
             maximum_chord_error = max(maximum_chord_error, chord)
+            minimum_flank_regular_factor = min(
+                minimum_flank_regular_factor, regular_factor
+            )
+            if physical_flank:
+                active_low = 0.0
+                active_high = teeth * math.pi * self.config.module
+                span_low = max(
+                    min(geometry.flank_transition_arc, geometry.flank_tip_arc),
+                    active_low,
+                )
+                span_high = min(
+                    max(geometry.flank_transition_arc, geometry.flank_tip_arc),
+                    active_high,
+                )
+                if span_low < span_high:
+                    protected_flanks.append(
+                        _ProtectedFlankSpan(
+                            driven=driven,
+                            phase=tooth_phase,
+                            sign=sign,
+                            start_arc=span_low,
+                            end_arc=span_high,
+                            tip_arc=geometry.flank_tip_arc,
+                        )
+                    )
             fillet_curve = lambda values, phase=tooth_phase, side=sign: (
                 self._analytic_fillet_points(
                     driven=driven,
@@ -2062,8 +2178,12 @@ class _GearGenerator:
                 maximum_chord_error=maximum_chord_error,
                 maximum_intersection_residual=(maximum_intersection_residual),
                 maximum_join_gap=maximum_join_gap,
+                maximum_hybrid_connector_length=(maximum_hybrid_connector_length),
                 maximum_fillet_root_residual=(maximum_fillet_root_residual),
+                minimum_flank_regular_factor=minimum_flank_regular_factor,
                 undercut_count=undercut_count,
+                hybrid_undercut_count=hybrid_undercut_count,
+                protected_flanks=tuple(protected_flanks),
             )
 
         root_blank, count, chord = self._analytic_root_blank(driven, samples_per_radian)
@@ -2071,11 +2191,22 @@ class _GearGenerator:
         maximum_chord_error = max(maximum_chord_error, chord)
         tooth_bodies: list[Geometry] = [root_blank]
 
-        def append_piece(ring: list[complex], points: NDArray[np.complex128]) -> None:
-            nonlocal maximum_join_gap
+        def append_piece(
+            ring: list[complex],
+            points: NDArray[np.complex128],
+            *,
+            hybrid_connector: bool = False,
+        ) -> None:
+            nonlocal maximum_hybrid_connector_length, maximum_join_gap
             piece = np.asarray(points, dtype=np.complex128).copy()
             if ring:
                 gap = abs(ring[-1] - piece[0])
+                if hybrid_connector:
+                    maximum_hybrid_connector_length = max(
+                        maximum_hybrid_connector_length, gap
+                    )
+                    ring.extend(piece)
+                    return
                 maximum_join_gap = max(maximum_join_gap, gap)
                 joint = 0.5 * (ring[-1] + piece[0])
                 ring[-1] = joint
@@ -2093,7 +2224,11 @@ class _GearGenerator:
                 first = geometries[tooth_phase, 1]
                 second = geometries[next_phase, -1]
                 append_piece(ring, fillets[tooth_phase, 1])
-                append_piece(ring, flanks[tooth_phase, 1])
+                append_piece(
+                    ring,
+                    flanks[tooth_phase, 1],
+                    hybrid_connector=first.hybrid_undercut,
+                )
                 addendum_start = first.addendum_tip_arc
                 addendum_end = second.addendum_tip_arc
                 addendum, count, chord = self._sample_analytic_curve(
@@ -2111,14 +2246,22 @@ class _GearGenerator:
                 total_samples += count
                 maximum_chord_error = max(maximum_chord_error, chord)
                 append_piece(ring, flanks[next_phase, -1][::-1])
-                append_piece(ring, fillets[next_phase, -1][::-1])
+                append_piece(
+                    ring,
+                    fillets[next_phase, -1][::-1],
+                    hybrid_connector=second.hybrid_undercut,
+                )
                 dedendum_start = second.fillet_root_arc
                 dedendum_end = first.fillet_root_arc
             else:
                 minus = geometries[tooth_phase, -1]
                 plus = geometries[tooth_phase, 1]
                 append_piece(ring, fillets[tooth_phase, -1])
-                append_piece(ring, flanks[tooth_phase, -1])
+                append_piece(
+                    ring,
+                    flanks[tooth_phase, -1],
+                    hybrid_connector=minus.hybrid_undercut,
+                )
                 addendum, count, chord = self._sample_analytic_curve(
                     lambda values: self._analytic_offset_points(
                         driven=False,
@@ -2134,7 +2277,11 @@ class _GearGenerator:
                 total_samples += count
                 maximum_chord_error = max(maximum_chord_error, chord)
                 append_piece(ring, flanks[tooth_phase, 1][::-1])
-                append_piece(ring, fillets[tooth_phase, 1][::-1])
+                append_piece(
+                    ring,
+                    fillets[tooth_phase, 1][::-1],
+                    hybrid_connector=plus.hybrid_undercut,
+                )
                 dedendum_start = plus.fillet_root_arc
                 dedendum_end = minus.fillet_root_arc
             dedendum, count, chord = self._sample_analytic_curve(
@@ -2178,8 +2325,12 @@ class _GearGenerator:
             maximum_chord_error=maximum_chord_error,
             maximum_intersection_residual=maximum_intersection_residual,
             maximum_join_gap=maximum_join_gap,
+            maximum_hybrid_connector_length=maximum_hybrid_connector_length,
             maximum_fillet_root_residual=maximum_fillet_root_residual,
+            minimum_flank_regular_factor=minimum_flank_regular_factor,
             undercut_count=undercut_count,
+            hybrid_undercut_count=hybrid_undercut_count,
+            protected_flanks=tuple(protected_flanks),
         )
 
     @staticmethod
@@ -2257,24 +2408,394 @@ class _GearGenerator:
             make_valid(Polygon(np.column_stack((ring.real, ring.imag))))
         )
 
+    def _protected_flank_points(
+        self,
+        span: _ProtectedFlankSpan,
+        *,
+        minimum_samples: int = MIN_CLOSURE_CURVE_SAMPLES,
+    ) -> NDArray[np.complex128]:
+        sample_count = max(
+            minimum_samples,
+            math.ceil(
+                abs(span.end_arc - span.start_arc)
+                / self.config.module
+                * INTERSECTION_SAMPLES_PER_PITCH
+                / math.pi
+            ),
+        )
+        common_arc = np.linspace(
+            span.start_arc,
+            span.end_arc,
+            sample_count + 1,
+        )
+        return self._analytic_involute_points(
+            driven=span.driven,
+            tooth_phase=span.phase,
+            sign=span.sign,
+            common_arc=common_arc,
+        )
+
+    def _protected_flank_guard(
+        self,
+        spans: tuple[_ProtectedFlankSpan, ...],
+        target: Geometry,
+    ) -> Geometry:
+        """Return a target-interior material strip along retained flanks."""
+
+        guard_width = _length_tolerance(
+            self.config.module,
+            PROTECTED_FLANK_GUARD_CHORD_FACTORS * ANALYTIC_CHORD_TOLERANCE_FACTOR,
+        )
+        guards = [
+            LineString(
+                np.column_stack(
+                    (
+                        (points := self._protected_flank_points(span)).real,
+                        points.imag,
+                    )
+                )
+            ).buffer(
+                guard_width,
+                quad_segs=TRIM_BUFFER_QUADRANT_SEGMENTS,
+            )
+            for span in spans
+        ]
+        if not guards:
+            return Point(0.0, 0.0).buffer(0.0)
+        return union_all(guards).intersection(target)
+
+    def _rolling_core_guard(self) -> Geometry:
+        """Protect the connected support core from mutual cutter erosion."""
+
+        return Point(0.0, 0.0).buffer(
+            self._support_radius(ROOT_SUPPORT_RADIUS_PITCH_FACTOR),
+            quad_segs=SUPPORT_BUFFER_QUADRANT_SEGMENTS,
+        )
+
+    def _clip_protected_flanks_to_boundary(
+        self,
+        spans: tuple[_ProtectedFlankSpan, ...],
+        outline: FloatArray,
+        *,
+        chord_error: float,
+    ) -> tuple[tuple[_ProtectedFlankSpan, ...], int]:
+        """Keep only the exposed component connected to each addendum tip."""
+
+        boundary = LineString(outline)
+        boundary_tolerance = chord_error + _length_tolerance(
+            self.config.module,
+            ANALYTIC_CHORD_TOLERANCE_FACTOR + GEOMETRY_LENGTH_TOLERANCE_FACTOR,
+        )
+        clipped: list[_ProtectedFlankSpan] = []
+        clipped_count = 0
+        sample_count = 2 * MIN_CLOSURE_CURVE_SAMPLES
+        for span in spans:
+            common_arc = np.linspace(
+                span.start_arc,
+                span.end_arc,
+                sample_count + 1,
+            )
+            points = self._analytic_involute_points(
+                driven=span.driven,
+                tooth_phase=span.phase,
+                sign=span.sign,
+                common_arc=common_arc,
+            )
+            exposed = np.asarray(
+                [
+                    boundary.distance(Point(point.real, point.imag))
+                    <= boundary_tolerance
+                    for point in points
+                ],
+                dtype=bool,
+            )
+            tip_index = int(np.argmin(np.abs(common_arc - span.tip_arc)))
+            if not exposed[tip_index]:
+                member = "driven" if span.driven else "drive"
+                raise RuntimeError(
+                    f"{member.capitalize()} flank addendum end is not exposed "
+                    f"for tooth {span.phase:g}, sign {span.sign}"
+                )
+            low_index = tip_index
+            high_index = tip_index
+            while low_index > 0 and exposed[low_index - 1]:
+                low_index -= 1
+            while high_index < sample_count and exposed[high_index + 1]:
+                high_index += 1
+            if low_index == high_index:
+                member = "driven" if span.driven else "drive"
+                raise RuntimeError(
+                    f"{member.capitalize()} flank has no exposed working span "
+                    f"for tooth {span.phase:g}, sign {span.sign}"
+                )
+            clipped_span = replace(
+                span,
+                start_arc=float(common_arc[low_index]),
+                end_arc=float(common_arc[high_index]),
+            )
+            if low_index != 0 or high_index != sample_count:
+                clipped_count += 1
+            clipped.append(clipped_span)
+        return tuple(clipped), clipped_count
+
+    def _verify_protected_flanks(
+        self,
+        spans: tuple[_ProtectedFlankSpan, ...],
+        outline: FloatArray,
+        *,
+        chord_error: float,
+    ) -> tuple[float, float]:
+        """Sample-check regularity and exposure of retained exact flanks."""
+
+        boundary = LineString(outline)
+        boundary_tolerance = chord_error + _length_tolerance(
+            self.config.module,
+            ANALYTIC_CHORD_TOLERANCE_FACTOR + GEOMETRY_LENGTH_TOLERANCE_FACTOR,
+        )
+        maximum_boundary_error = 0.0
+        minimum_regular_factor = math.inf
+        pitch = math.pi * self.config.module
+        for span in spans:
+            singular_arcs = self._analytic_singular_arcs(
+                driven=span.driven,
+                tooth_phase=span.phase,
+                sign=span.sign,
+                start_arc=span.start_arc,
+                end_arc=span.end_arc,
+            )
+            if singular_arcs:
+                member = "driven" if span.driven else "drive"
+                raise RuntimeError(
+                    f"{member.capitalize()} protected working flank contains a "
+                    f"cusp for tooth {span.phase:g}, sign {span.sign}"
+                )
+            common_arc = np.linspace(
+                span.start_arc,
+                span.end_arc,
+                MIN_CLOSURE_CURVE_SAMPLES + 1,
+            )
+            points = self._analytic_involute_points(
+                driven=span.driven,
+                tooth_phase=span.phase,
+                sign=span.sign,
+                common_arc=common_arc,
+            )
+            line = LineString(np.column_stack((points.real, points.imag)))
+            if not line.is_simple:
+                member = "driven" if span.driven else "drive"
+                raise RuntimeError(
+                    f"{member.capitalize()} protected working flank "
+                    f"self-intersects for tooth {span.phase:g}, sign {span.sign}"
+                )
+            phi = self._phi_from_common_arc(common_arc)
+            curvature = (
+                self._driven_curvature(phi)
+                if span.driven
+                else self._drive_curvature(phi)
+            )
+            rack_coordinate = span.sign * 0.25 * pitch - (
+                common_arc - span.phase * pitch
+            )
+            regular_factor = np.abs(
+                rack_coordinate * curvature * math.cos(self.alpha)
+                - span.sign * math.sin(self.alpha)
+            )
+            span_minimum = float(np.min(regular_factor))
+            minimum_regular_factor = min(minimum_regular_factor, span_minimum)
+            if span_minimum <= ANALYTIC_REGULAR_DERIVATIVE_TOLERANCE:
+                member = "driven" if span.driven else "drive"
+                raise RuntimeError(
+                    f"{member.capitalize()} protected working flank is singular "
+                    f"for tooth {span.phase:g}, sign {span.sign}"
+                )
+            span_boundary_error = max(
+                boundary.distance(Point(point.real, point.imag)) for point in points
+            )
+            maximum_boundary_error = max(maximum_boundary_error, span_boundary_error)
+            if span_boundary_error > boundary_tolerance:
+                member = "driven" if span.driven else "drive"
+                raise RuntimeError(
+                    f"{member.capitalize()} protected working flank is not "
+                    f"exposed on the finished boundary for tooth {span.phase:g}, "
+                    f"sign {span.sign} (distance {span_boundary_error:.9g})"
+                )
+        return maximum_boundary_error, minimum_regular_factor
+
+    def _verify_protected_contact_coverage(
+        self,
+        drive_spans: tuple[_ProtectedFlankSpan, ...],
+        driven_spans: tuple[_ProtectedFlankSpan, ...],
+    ) -> tuple[int, float, int, float]:
+        """Measure exact paired-flank coverage at uncorrected sampled poses."""
+
+        phase_count = (
+            max(
+                VERIFICATION_MIN_CLOSED_PHASES,
+                VERIFICATION_PHASES_PER_TOOTH
+                * max(self.drive_teeth, self.driven_teeth),
+            )
+            if self.closed
+            else VERIFICATION_MIN_OPEN_PHASES
+        )
+        fraction_grids = [
+            (
+                (np.arange(phase_count) + offset) / phase_count
+                if self.closed
+                else np.clip(
+                    (np.arange(phase_count) + offset) / max(1, phase_count - 1),
+                    0.0,
+                    1.0,
+                )
+            )
+            for offset in ROLLING_STAGGER_OFFSETS
+        ]
+        fractions = np.unique(np.concatenate(fraction_grids))
+        pitch = math.pi * self.config.module
+        parameter_tolerance = _length_tolerance(
+            self.config.module,
+            INTERSECTION_PARAMETER_DEDUP_FACTOR,
+        )
+        geometric_tolerance = _length_tolerance(
+            self.config.module,
+            PROTECTED_CONTACT_RESIDUAL_FACTOR,
+        )
+        drive_cycle_arc = self.drive_teeth * pitch
+        driven_cycle_arc = self.driven_teeth * pitch
+        psi_start = float(self._psi(self.active_start))
+        spans_by_member_and_sign = {
+            (False, sign): tuple(span for span in drive_spans if span.sign == sign)
+            for sign in (-1, 1)
+        } | {
+            (True, sign): tuple(span for span in driven_spans if span.sign == sign)
+            for sign in (-1, 1)
+        }
+
+        def local_arc(value: float, cycle_arc: float) -> float:
+            if not self.closed:
+                return value
+            result = value % cycle_arc
+            return (
+                0.0
+                if math.isclose(
+                    result,
+                    cycle_arc,
+                    abs_tol=parameter_tolerance,
+                )
+                else result
+            )
+
+        minimum_pair_count = math.inf
+        maximum_contact_residual = 0.0
+        covered_phase_count = 0
+        for fraction in fractions:
+            phi = self.active_start + (self.active_end - self.active_start) * float(
+                fraction
+            )
+            common_arc = self.center_distance * float(
+                self.arc_integral.integral(self.active_start, phi)
+            )
+            drive_arc = local_arc(common_arc, drive_cycle_arc)
+            driven_arc = local_arc(common_arc, driven_cycle_arc)
+            drive_angle = phi - self.active_start
+            driven_angle = -(float(self._psi(phi)) - psi_start)
+            relative_angle = driven_angle - drive_angle
+            center_x = self.center_distance * math.cos(drive_angle)
+            center_y = -self.center_distance * math.sin(drive_angle)
+            pair_count = 0
+            for sign in (-1, 1):
+                matching_drive = [
+                    span
+                    for span in spans_by_member_and_sign[False, sign]
+                    if span.start_arc - parameter_tolerance
+                    <= drive_arc
+                    <= span.end_arc + parameter_tolerance
+                ]
+                matching_driven = [
+                    span
+                    for span in spans_by_member_and_sign[True, sign]
+                    if span.start_arc - parameter_tolerance
+                    <= driven_arc
+                    <= span.end_arc + parameter_tolerance
+                ]
+                for drive_span in matching_drive:
+                    drive_lambda = sign * 0.25 * pitch - (
+                        drive_arc - drive_span.phase * pitch
+                    )
+                    for driven_span in matching_driven:
+                        driven_lambda = sign * 0.25 * pitch - (
+                            driven_arc - driven_span.phase * pitch
+                        )
+                        if abs(drive_lambda - driven_lambda) > parameter_tolerance:
+                            continue
+                        drive_point = self._analytic_involute_points(
+                            driven=False,
+                            tooth_phase=drive_span.phase,
+                            sign=sign,
+                            common_arc=np.asarray([drive_arc]),
+                        )[0]
+                        driven_point = self._analytic_involute_points(
+                            driven=True,
+                            tooth_phase=driven_span.phase,
+                            sign=sign,
+                            common_arc=np.asarray([driven_arc]),
+                        )[0]
+                        placed_driven = driven_point * complex(
+                            math.cos(relative_angle),
+                            math.sin(relative_angle),
+                        ) + complex(center_x, center_y)
+                        residual = abs(drive_point - placed_driven)
+                        maximum_contact_residual = max(
+                            maximum_contact_residual, residual
+                        )
+                        if residual <= geometric_tolerance:
+                            pair_count += 1
+            minimum_pair_count = min(minimum_pair_count, pair_count)
+            if pair_count > 0:
+                covered_phase_count += 1
+        if covered_phase_count == 0:
+            raise RuntimeError(
+                "Protected involute flanks provide no sampled exact conjugate "
+                "contact candidates"
+            )
+        return (
+            int(minimum_pair_count),
+            maximum_contact_residual,
+            len(fractions),
+            covered_phase_count / len(fractions),
+        )
+
     def _trim_rolling_nonworking_interference(
-        self, drive: FloatArray, driven: FloatArray
-    ) -> tuple[FloatArray, FloatArray, int, float, float, float]:
+        self,
+        drive: FloatArray,
+        driven: FloatArray,
+        drive_flanks: tuple[_ProtectedFlankSpan, ...],
+        driven_flanks: tuple[_ProtectedFlankSpan, ...],
+    ) -> tuple[FloatArray, FloatArray, int, float, float, float, int]:
         """Trim non-working interference by rolling the finished pair.
 
-        The analytical profiles remain authoritative outside their pitch
-        curves. At each rolling pose GEOS computes actual solid overlap; only
-        portions inward of the pitch curves are eligible for removal. Four
-        staggered phase grids prevent a favorable tooth-grid alignment from
-        hiding an undercut.
+        On closed gears, retained analytic flanks and the connected support
+        cores are protected. Any other overlapping material is eligible for
+        removal, including a nonconvex cusp loop outside the pitch curve. Both
+        gears are updated from the same grid snapshot and the staggered grids
+        repeat to a sampled fixed point. Open profiles retain the historical
+        pitch-side-only, single-pass trim because their endpoint closures are
+        not periodic cutter stock.
         """
 
         drive_geometry: Geometry = Polygon(drive[:-1])
         driven_geometry: Geometry = Polygon(driven[:-1])
-        drive_root_zone = self._analytic_pitch_material(False)
-        driven_root_zone = self._analytic_pitch_material(True)
-        drive_trim_zone = drive_root_zone
-        driven_trim_zone = driven_root_zone
+        drive_flank_guard = self._protected_flank_guard(drive_flanks, drive_geometry)
+        driven_flank_guard = self._protected_flank_guard(driven_flanks, driven_geometry)
+        drive_core_guard = self._rolling_core_guard().intersection(drive_geometry)
+        driven_core_guard = self._rolling_core_guard().intersection(driven_geometry)
+        drive_exclusion = union_all([drive_flank_guard, drive_core_guard])
+        driven_exclusion = union_all([driven_flank_guard, driven_core_guard])
+        drive_trim_zone = (
+            drive_geometry if self.closed else self._analytic_pitch_material(False)
+        )
+        driven_trim_zone = (
+            driven_geometry if self.closed else self._analytic_pitch_material(True)
+        )
         phase_count = (
             max(
                 ROLLING_MIN_PHASES,
@@ -2284,156 +2805,183 @@ class _GearGenerator:
             else ROLLING_MIN_PHASES
         )
         overlap_tolerance = self._overlap_area_tolerance()
-        # Endpoint closure faces can be analytically coincident while their
-        # independently tessellated polygons enclose a minute sliver. Apply
-        # the same certified area tolerance used by final rolling
-        # verification; eligible cuts remain restricted to the root masks.
         classification_tolerance = overlap_tolerance
-        # Buffer by one certified chord-error allowance so finite-precision
-        # Boolean boundaries do not leave a sliver of the measured overlap.
         trim_clearance = _length_tolerance(
             self.config.module, ANALYTIC_CHORD_TOLERANCE_FACTOR
         )
+        convergence_tolerance = ROLLING_CONVERGENCE_AREA_FACTOR * self.config.module**2
         psi_start = float(self._psi(self.active_start))
         initial_overlap = 0.0
         remaining_overlap = 0.0
         total_removed_area = 0.0
         total_phases = 0
+        pass_count = 0
 
-        for offset in ROLLING_STAGGER_OFFSETS:
-            fractions = (
-                (np.arange(phase_count) + offset) / phase_count
-                if self.closed
-                else np.clip(
-                    (np.arange(phase_count) + offset) / max(1, phase_count - 1),
-                    0.0,
-                    1.0,
+        maximum_passes = ROLLING_MAX_PASSES if self.closed else 1
+        for pass_index in range(maximum_passes):
+            pass_count = pass_index + 1
+            pass_removed_area = 0.0
+            pass_maximum_overlap = 0.0
+            for offset in ROLLING_STAGGER_OFFSETS:
+                fractions = (
+                    (np.arange(phase_count) + offset) / phase_count
+                    if self.closed
+                    else np.clip(
+                        (np.arange(phase_count) + offset) / max(1, phase_count - 1),
+                        0.0,
+                        1.0,
+                    )
                 )
-            )
-            drive_cuts: list[Geometry] = []
-            driven_cuts: list[Geometry] = []
-            grid_maximum = 0.0
+                drive_cuts: list[Geometry] = []
+                driven_cuts: list[Geometry] = []
+                grid_maximum = 0.0
 
-            def phase_root_cut(
-                fraction: float,
-                current_drive: Geometry = drive_geometry,
-                current_driven: Geometry = driven_geometry,
-            ) -> tuple[float, Geometry | None, Geometry | None, float]:
-                phi = self.active_start + (self.active_end - self.active_start) * float(
-                    fraction
-                )
-                drive_angle = phi - self.active_start
-                driven_angle = -(float(self._psi(phi)) - psi_start)
-                relative_angle = driven_angle - drive_angle
-                center_x = self.center_distance * math.cos(drive_angle)
-                center_y = -self.center_distance * math.sin(drive_angle)
-                # Evaluate the pose in the drive gear's local frame. Rigid
-                # transforms preserve overlap area, and this leaves the larger
-                # drive body stationary instead of copying it every phase.
-                placed_drive = current_drive
-                placed_driven = self._place_geometry(
-                    current_driven,
-                    relative_angle,
-                    center_x,
-                    center_y,
-                )
-                overlap = placed_drive.intersection(placed_driven)
-                area = float(overlap.area)
-                if area <= overlap_tolerance:
-                    return area, None, None, 0.0
-                placed_drive_root = drive_root_zone
-                placed_driven_root = self._place_geometry(
-                    driven_root_zone,
-                    relative_angle,
-                    center_x,
-                    center_y,
-                )
-                drive_root_overlap = overlap.intersection(placed_drive_root)
-                driven_root_overlap = overlap.intersection(placed_driven_root)
-                coverage: list[Geometry] = [
-                    drive_root_overlap,
-                    driven_root_overlap,
-                ]
-                covered = union_all(coverage)
-                uncovered_area = float(overlap.difference(covered).area)
-                drive_overlap = drive_root_overlap
-                driven_overlap = driven_root_overlap
-                local_drive_cut = drive_overlap if not drive_overlap.is_empty else None
-                local_driven_cut = (
-                    self._unplace_geometry(
-                        driven_overlap,
+                def phase_nonworking_cut(
+                    fraction: float,
+                    current_drive: Geometry = drive_geometry,
+                    current_driven: Geometry = driven_geometry,
+                ) -> tuple[float, Geometry | None, Geometry | None, float]:
+                    phi = self.active_start + (
+                        self.active_end - self.active_start
+                    ) * float(fraction)
+                    drive_angle = phi - self.active_start
+                    driven_angle = -(float(self._psi(phi)) - psi_start)
+                    relative_angle = driven_angle - drive_angle
+                    center_x = self.center_distance * math.cos(drive_angle)
+                    center_y = -self.center_distance * math.sin(drive_angle)
+                    placed_driven = self._place_geometry(
+                        current_driven,
                         relative_angle,
                         center_x,
                         center_y,
                     )
-                    if not driven_overlap.is_empty
-                    else None
-                )
-                return (
-                    area,
-                    local_drive_cut,
-                    local_driven_cut,
-                    uncovered_area,
-                )
-
-            with ThreadPoolExecutor(
-                max_workers=min(_MAX_GEOMETRY_WORKERS, len(fractions))
-            ) as executor:
-                phase_results = executor.map(
-                    phase_root_cut, (float(value) for value in fractions)
-                )
-                for (
-                    area,
-                    drive_root_overlap,
-                    driven_root_overlap,
-                    uncovered_area,
-                ) in phase_results:
-                    grid_maximum = max(grid_maximum, area)
-                    if uncovered_area > classification_tolerance:
-                        raise RuntimeError(
-                            "Rolling verification found interference on the "
-                            "certified involute working flanks "
-                            f"(area {uncovered_area:.9g})"
+                    overlap = current_drive.intersection(placed_driven)
+                    area = float(overlap.area)
+                    if area <= overlap_tolerance:
+                        return area, None, None, 0.0
+                    placed_driven_exclusion = self._place_geometry(
+                        driven_exclusion,
+                        relative_angle,
+                        center_x,
+                        center_y,
+                    )
+                    if self.closed:
+                        protected_on_both = overlap.intersection(
+                            drive_exclusion
+                        ).intersection(placed_driven_exclusion)
+                        unremovable = protected_on_both
+                        drive_overlap = overlap.difference(drive_exclusion)
+                        driven_overlap = overlap.difference(placed_driven_exclusion)
+                    else:
+                        placed_driven_trim_zone = self._place_geometry(
+                            driven_trim_zone,
+                            relative_angle,
+                            center_x,
+                            center_y,
                         )
-                    if drive_root_overlap is not None:
-                        drive_cuts.append(drive_root_overlap)
-                    if driven_root_overlap is not None:
-                        driven_cuts.append(driven_root_overlap)
-            total_phases += len(fractions)
-            if offset == 0.0:
-                initial_overlap = grid_maximum
-            remaining_overlap = max(remaining_overlap, grid_maximum)
-            if not drive_cuts and not driven_cuts:
-                continue
-            before_drive = float(drive_geometry.area)
-            before_driven = float(driven_geometry.area)
-            if drive_cuts:
-                drive_cut = (
-                    union_all(drive_cuts)
-                    .buffer(
+                        drive_root_overlap = overlap.intersection(drive_trim_zone)
+                        driven_root_overlap = overlap.intersection(
+                            placed_driven_trim_zone
+                        )
+                        outside_root_zones = overlap.difference(
+                            union_all([drive_root_overlap, driven_root_overlap])
+                        )
+                        unremovable = outside_root_zones
+                        drive_overlap = drive_root_overlap
+                        driven_overlap = driven_root_overlap
+                    unremovable_area = float(unremovable.area)
+                    local_drive_cut = (
+                        make_valid(drive_overlap)
+                        if not drive_overlap.is_empty
+                        else None
+                    )
+                    local_driven_cut = (
+                        make_valid(
+                            self._unplace_geometry(
+                                make_valid(driven_overlap),
+                                relative_angle,
+                                center_x,
+                                center_y,
+                            )
+                        )
+                        if not driven_overlap.is_empty
+                        else None
+                    )
+                    return (
+                        area,
+                        local_drive_cut,
+                        local_driven_cut,
+                        unremovable_area,
+                    )
+
+                with ThreadPoolExecutor(
+                    max_workers=min(_MAX_GEOMETRY_WORKERS, len(fractions))
+                ) as executor:
+                    phase_results = executor.map(
+                        phase_nonworking_cut,
+                        (float(value) for value in fractions),
+                    )
+                    for (
+                        area,
+                        drive_overlap,
+                        driven_overlap,
+                        unremovable_area,
+                    ) in phase_results:
+                        grid_maximum = max(grid_maximum, area)
+                        if unremovable_area > classification_tolerance:
+                            raise RuntimeError(
+                                "Opposing-gear cutter interference cannot be "
+                                "removed without entering protected working "
+                                "flanks or support cores "
+                                f"(area {unremovable_area:.9g})"
+                            )
+                        if drive_overlap is not None:
+                            drive_cuts.append(drive_overlap)
+                        if driven_overlap is not None:
+                            driven_cuts.append(driven_overlap)
+                total_phases += len(fractions)
+                if pass_index == 0 and offset == 0.0:
+                    initial_overlap = grid_maximum
+                pass_maximum_overlap = max(pass_maximum_overlap, grid_maximum)
+                if not drive_cuts and not driven_cuts:
+                    continue
+                before_drive = float(drive_geometry.area)
+                before_driven = float(driven_geometry.area)
+                if drive_cuts:
+                    drive_cut = union_all(drive_cuts).buffer(
                         trim_clearance,
                         quad_segs=TRIM_BUFFER_QUADRANT_SEGMENTS,
                     )
-                    .intersection(drive_trim_zone)
-                )
-                drive_geometry = drive_geometry.difference(drive_cut)
-            if driven_cuts:
-                driven_cut = (
-                    union_all(driven_cuts)
-                    .buffer(
+                    if self.closed:
+                        drive_cut = drive_cut.difference(drive_exclusion)
+                    drive_cut = drive_cut.intersection(drive_trim_zone)
+                    drive_geometry = drive_geometry.difference(drive_cut)
+                if driven_cuts:
+                    driven_cut = union_all(driven_cuts).buffer(
                         trim_clearance,
                         quad_segs=TRIM_BUFFER_QUADRANT_SEGMENTS,
                     )
-                    .intersection(driven_trim_zone)
+                    if self.closed:
+                        driven_cut = driven_cut.difference(driven_exclusion)
+                    driven_cut = driven_cut.intersection(driven_trim_zone)
+                    driven_geometry = driven_geometry.difference(driven_cut)
+                drive_geometry = _clean_polygon(drive_geometry)
+                driven_geometry = _clean_polygon(driven_geometry)
+                removed_area = (
+                    before_drive
+                    - float(drive_geometry.area)
+                    + before_driven
+                    - float(driven_geometry.area)
                 )
-                driven_geometry = driven_geometry.difference(driven_cut)
-            drive_geometry = _clean_polygon(drive_geometry)
-            driven_geometry = _clean_polygon(driven_geometry)
-            total_removed_area += (
-                before_drive
-                - float(drive_geometry.area)
-                + before_driven
-                - float(driven_geometry.area)
+                pass_removed_area += removed_area
+                total_removed_area += removed_area
+            remaining_overlap = pass_maximum_overlap
+            if not self.closed or pass_removed_area <= convergence_tolerance:
+                break
+        else:
+            raise RuntimeError(
+                "Opposing-gear cutter trimming did not converge within "
+                f"{maximum_passes} passes"
             )
 
         drive_outline = _outline(
@@ -2451,6 +2999,7 @@ class _GearGenerator:
             initial_overlap,
             remaining_overlap,
             total_removed_area,
+            pass_count,
         )
 
     @staticmethod
@@ -2684,6 +3233,31 @@ class _GearGenerator:
             )
         drive = drive_result.outline
         driven = driven_result.outline
+        drive_protected_flanks, drive_clipped_flank_count = (
+            self._clip_protected_flanks_to_boundary(
+                drive_result.protected_flanks,
+                drive,
+                chord_error=drive_result.maximum_chord_error,
+            )
+        )
+        driven_protected_flanks, driven_clipped_flank_count = (
+            self._clip_protected_flanks_to_boundary(
+                driven_result.protected_flanks,
+                driven,
+                chord_error=driven_result.maximum_chord_error,
+            )
+        )
+        drive_result = replace(
+            drive_result,
+            protected_flanks=drive_protected_flanks,
+        )
+        driven_result = replace(
+            driven_result,
+            protected_flanks=driven_protected_flanks,
+        )
+        boundary_clipped_flank_count = (
+            drive_clipped_flank_count + driven_clipped_flank_count
+        )
         analytic_curve_sample_count = (
             drive_result.sample_count + driven_result.sample_count
         )
@@ -2710,12 +3284,33 @@ class _GearGenerator:
             drive_result.maximum_join_gap,
             driven_result.maximum_join_gap,
         )
+        maximum_hybrid_connector_length = max(
+            drive_result.maximum_hybrid_connector_length,
+            driven_result.maximum_hybrid_connector_length,
+        )
         maximum_fillet_root_residual = max(
             drive_result.maximum_fillet_root_residual,
             driven_result.maximum_fillet_root_residual,
         )
         analytic_undercut_count = (
             drive_result.undercut_count + driven_result.undercut_count
+        )
+        hybrid_undercut_count = (
+            drive_result.hybrid_undercut_count + driven_result.hybrid_undercut_count
+        )
+        pretrim_drive_flank_error, pretrim_drive_regular_factor = (
+            self._verify_protected_flanks(
+                drive_result.protected_flanks,
+                drive,
+                chord_error=drive_result.maximum_chord_error,
+            )
+        )
+        pretrim_driven_flank_error, pretrim_driven_regular_factor = (
+            self._verify_protected_flanks(
+                driven_result.protected_flanks,
+                driven,
+                chord_error=driven_result.maximum_chord_error,
+            )
         )
         (
             drive,
@@ -2724,7 +3319,50 @@ class _GearGenerator:
             rolling_initial_overlap,
             rolling_sampled_overlap,
             rolling_removed_area,
-        ) = self._trim_rolling_nonworking_interference(drive, driven)
+            rolling_trim_pass_count,
+        ) = self._trim_rolling_nonworking_interference(
+            drive,
+            driven,
+            drive_result.protected_flanks,
+            driven_result.protected_flanks,
+        )
+        posttrim_drive_flank_error, posttrim_drive_regular_factor = (
+            self._verify_protected_flanks(
+                drive_result.protected_flanks,
+                drive,
+                chord_error=drive_result.maximum_chord_error,
+            )
+        )
+        posttrim_driven_flank_error, posttrim_driven_regular_factor = (
+            self._verify_protected_flanks(
+                driven_result.protected_flanks,
+                driven,
+                chord_error=driven_result.maximum_chord_error,
+            )
+        )
+        (
+            minimum_protected_contact_pairs,
+            maximum_protected_contact_residual,
+            protected_contact_verification_phases,
+            protected_contact_coverage_fraction,
+        ) = self._verify_protected_contact_coverage(
+            drive_result.protected_flanks,
+            driven_result.protected_flanks,
+        )
+        maximum_protected_flank_boundary_error = max(
+            pretrim_drive_flank_error,
+            pretrim_driven_flank_error,
+            posttrim_drive_flank_error,
+            posttrim_driven_flank_error,
+        )
+        minimum_flank_regular_factor = min(
+            drive_result.minimum_flank_regular_factor,
+            driven_result.minimum_flank_regular_factor,
+            pretrim_drive_regular_factor,
+            pretrim_driven_regular_factor,
+            posttrim_drive_regular_factor,
+            posttrim_driven_regular_factor,
+        )
         envelope_tolerance = _length_tolerance(
             self.config.module, ANALYTIC_ENVELOPE_RESIDUAL_FACTOR
         )
@@ -2828,12 +3466,34 @@ class _GearGenerator:
             "total_integral": self.total_integral,
             "center_distance": self.center_distance,
             "undercut_curvature_limit": self.curvature_limit,
+            "undercut_detection_method": "exact_per_flank_cusp_equation",
             "maximum_join_gap": maximum_join_gap,
+            "maximum_hybrid_connector_length": (maximum_hybrid_connector_length),
             "maximum_intersection_residual": maximum_intersection_residual,
             "maximum_fillet_root_residual": maximum_fillet_root_residual,
             "analytic_undercut_count": analytic_undercut_count,
-            "rolling_nonworking_trim_scope": "pitch_side_roots",
+            "hybrid_undercut_count": hybrid_undercut_count,
+            "protected_flank_count": (
+                len(drive_result.protected_flanks) + len(driven_result.protected_flanks)
+            ),
+            "boundary_clipped_flank_count": boundary_clipped_flank_count,
+            "minimum_flank_regular_factor": minimum_flank_regular_factor,
+            "maximum_protected_flank_boundary_error": (
+                maximum_protected_flank_boundary_error
+            ),
+            "minimum_protected_contact_pairs": (minimum_protected_contact_pairs),
+            "maximum_protected_contact_residual": (maximum_protected_contact_residual),
+            "protected_contact_verification_phase_count": (
+                protected_contact_verification_phases
+            ),
+            "protected_contact_coverage_fraction": (
+                protected_contact_coverage_fraction
+            ),
+            "rolling_nonworking_trim_scope": (
+                "all_unprotected_tooth_material" if self.closed else "pitch_side_roots"
+            ),
             "rolling_nonworking_trim_phase_count": rolling_trim_phase_count,
+            "rolling_nonworking_trim_pass_count": rolling_trim_pass_count,
             "rolling_nonworking_initial_overlap_area": rolling_initial_overlap,
             "rolling_nonworking_sampled_overlap_area": rolling_sampled_overlap,
             "rolling_nonworking_removed_area": rolling_removed_area,
@@ -2848,9 +3508,18 @@ class _GearGenerator:
             "maximum_envelope_residual": maximum_envelope_residual,
             "maximum_envelope_tangency_residual": maximum_tangency_residual,
             "maximum_analytic_chord_error": maximum_chord_error,
-            "nonworking_closure": ("analytic_rack_tip_and_dedendum_envelopes"),
+            "nonworking_closure": (
+                "analytic_rack_tip_and_dedendum_envelopes"
+                if hybrid_undercut_count == 0
+                else "analytic_fillets_with_opposing_gear_undercuts"
+            ),
             "requested_fillet_radius": self.fillet_radius,
-            "requested_fillet_applied_to_closure": True,
+            "requested_fillet_applied_to_closure": (hybrid_undercut_count == 0),
+            "fillet_closure_mode": (
+                "analytic_only"
+                if hybrid_undercut_count == 0
+                else "analytic_with_hybrid_opposing_cutter"
+            ),
             "verification_phase_count": verification_phases,
             "maximum_transmission_error": transmission_error,
             "maximum_sliding_velocity_factor": (1.0 + maximum_ratio)

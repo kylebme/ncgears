@@ -4,7 +4,8 @@
 construction. It evaluates generalized-involute working flanks, rounded
 rack-tip fillet envelopes, and addendum/dedendum offsets directly. Shapely/GEOS
 arranges those curves into solids, and a rolling-pair pass removes interference
-only inside the pitch-side root regions.
+from any non-working tooth material. Exact regular flank spans and the connected
+support cores are protected from those cuts.
 
 No complete rack solid is swept through the gear. This is important for
 nonconvex centrodes, where a remote part of a fictitious rack can cross a
@@ -44,6 +45,9 @@ The delivered outline is still a tessellated polygon. Metadata reports:
 - `maximum_intersection_residual`
 - `maximum_fillet_root_residual`
 - `maximum_analytic_chord_error`
+- `minimum_flank_regular_factor`
+- `maximum_protected_flank_boundary_error`
+- `maximum_protected_contact_residual`
 
 All dimensional tolerances are factors of module defined in
 `ncgears/_policy.py`; there is no hidden unit-sized tolerance floor. Very large
@@ -53,11 +57,23 @@ remnants remain unsuitable inputs.
 ## Rolling root generation and verification
 
 Root undercuts and other non-working interference are resolved by running the
-finished analytical pair through the requested motion. Material removal is
-restricted to the pitch-side root masks, so the certified involute working
-flanks are not modified.
+finished analytical pair through the requested motion, using each opposing gear
+as a cutter. On closed gears, cusp-free analytic spans that remain exposed on
+the arranged body are protected by one-sided material guards. Overlap may be
+removed from either gear outside those guards, including above the pitch curve
+for a nonconvex cusp loop. If an overlap is protected on both gears, the design
+is rejected. Open profiles retain the more conservative pitch-side root trim
+because their artificial endpoint closure faces are not periodic cutter stock.
 
-The rolling trim and final solid checks use four staggered phase grids. Several
+The analytic rounded rack-tip fillet remains the preferred closure. When it
+cannot join a cusp-free flank component, a sacrificial connection closes the
+initial stock and the opposing-gear pass generates the non-working undercut.
+Metadata distinguishes these cases with `hybrid_undercut_count` and
+`fillet_closure_mode`.
+
+For closed gears the rolling cutter repeats four staggered phase grids until
+sampled removed area converges. An open profile receives one four-grid sweep.
+Protected contact coverage is checked on the same staggered grid, and several
 off-grid phases additionally recover the first solid-contact angle on both
 sides of the requested pose. This catches grid-aligned errors, but it is a
 dense sampled verification rather than a formal interval-arithmetic proof over
