@@ -229,6 +229,24 @@ def test_analytic_involute_retains_exact_circular_root_depth(
     assert pair.metadata["rolling_nonworking_removed_area"] == pytest.approx(0.0)
 
 
+def test_closed_undercut_count_excludes_periodic_seam_flanks(
+    tmp_path: Path,
+) -> None:
+    pair = ncgears.generate(
+        "phi",
+        name="circular_undercut_count",
+        teeth=6,
+        samples=1024,
+        samples_per_radian=20,
+        output_directory=tmp_path,
+    )
+
+    # At this pitch radius every physical flank is undercut: two flanks per
+    # tooth on each of the two gears. The periodic seam copies are not physical
+    # flanks and must not inflate the reported count.
+    assert pair.metadata["analytic_undercut_count"] == 4 * pair.drive_teeth
+
+
 def test_python_engine_solves_centrode_center_distance(tmp_path: Path) -> None:
     pair = ncgears.generate_from_centrode(
         "1 + 0.08*cos(2*phi)",

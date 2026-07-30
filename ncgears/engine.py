@@ -1812,7 +1812,11 @@ class _GearGenerator:
                 maximum_fillet_root_residual,
                 abs(fillet_root - dedendum_root),
             )
-            undercut_count += int(geometry.undercut)
+            # Closed profiles evaluate phase ``teeth`` as a periodic copy of
+            # phase zero so the final body can join the first.  Keep that
+            # geometry for arrangement, but do not count its two flanks twice.
+            if geometry.undercut and (not self.closed or tooth_phase < teeth):
+                undercut_count += 1
             flank, count, envelope, tangency, chord = self._sample_analytic_flank(
                 driven=driven,
                 geometry=geometry,
