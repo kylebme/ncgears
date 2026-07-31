@@ -3,9 +3,12 @@
 /.venv/
 /dist/
 /wheelhouse/
+/target/
 /.cache/
 .DS_Store
 __pycache__/
 *.pyc
 *.egg-info/
+ncgears/_rust*.so
+ncgears/_rust*.pyd
 uv.lock

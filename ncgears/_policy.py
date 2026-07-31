@@ -136,8 +136,9 @@ VERIFICATION_MIN_OPEN_PHASES = 48
 VERIFICATION_PHASES_PER_TOOTH = 4
 OVERLAP_AREA_TOLERANCE_FACTOR = 1e-6
 # A phase can involve a small contact neighborhood, not every tooth on a gear.
-# This bounded allowance replaces the former tolerance growth with tooth count.
-OVERLAP_CONTACT_PAIR_ALLOWANCE = 4
+# Six unit-area cells cover the observed GEOS platform variation for the same
+# tessellated contact while remaining independent of the total tooth count.
+OVERLAP_CONTACT_PAIR_ALLOWANCE = 6
 CONTACT_AREA_TOLERANCE_FACTOR = 1e-11
 CONTACT_RECOVERY_PHASES_CLOSED = 6
 CONTACT_RECOVERY_PHASES_OPEN = 4
