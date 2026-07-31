@@ -33,7 +33,8 @@ Most functionality is available in the CLI:
 
 ```bash
 ncgears "phi - 0.08*sin(2*phi)" --teeth 24 --module 1.5 \
-  --name two_lobe --dxf two_lobe.dxf --render --gif --plot
+  --clearance-factor 0.05 --name two_lobe \
+  --dxf two_lobe.dxf --render --gif --plot
 
 ncgears "1 + 0.08*cos(2*phi)" --centrode --teeth 20 \
   --name centrode_two_lobe
@@ -54,6 +55,7 @@ pair = ncgears.generate(
     "phi - 0.08*sin(2*phi)",
     teeth=24,
     module=1.5,
+    clearance_factor=0.05,
     name="two_lobe",
 )
 
@@ -93,6 +95,15 @@ figure.suptitle("My mechanism")
 The output directory defaults to `out/<name>/`. Each successful generation
 contains `drive.csv`, `driven.csv`, `metadata.json`, and the sampled input.
 
+`clearance_factor` requests a minimum gap between mating non-working surfaces,
+as a multiple of module. For example, `0.05` requests 0.075 mm at module 1.5.
+It applies to transmission-law and centrode inputs, and to both closed and
+finite open gears. Analytic dedenda deepen only when their existing
+addendum-to-dedendum gap is smaller than the request; opposing-gear undercuts
+are generated from a clearance-extended addendum-tip cutter envelope. Working
+flanks are neither offset nor used as clearance cutters, so contact remains on
+the intended exact flank. The default is `0.0` for backward compatibility.
+
 ## Start from a pitch curve
 
 If the drive gear's pitch radius is easier to describe than its motion law, use
@@ -128,13 +139,14 @@ straight-rack flank and rounded rack-tip envelope equations without constructing
 or sweeping a complete rack solid, so remote rack material cannot erase a
 pitch-curve concavity. Exact addendum and dedendum offsets complete each tooth.
 An independent rolling pass uses each opposing gear as a cutter to remove
-measured non-working interference. On closed gears, exact regular flank spans
-and the connected support cores are guarded; other material, including
-nonconvex cusp loops outside the pitch curve, may be removed. Finite open
-profiles retain pitch-side-only trimming and clip each analytical curve in rolling-arc
-parameter space, then follow one quarter of the centrode back across the inner
-boundary. Source-domain padding is used only to solve endpoint teeth; it cannot
-change or clip the finished body.
+measured non-working interference and applies any requested non-working
+clearance. On closed gears, exact regular flank spans and the connected support
+cores are guarded; other material, including nonconvex cusp loops outside the
+pitch curve, may be removed. Finite open profiles retain pitch-side-only
+trimming and clip each analytical curve in rolling-arc parameter space, then
+follow one quarter of the centrode back across the inner boundary. Source-domain
+padding is used only to solve endpoint teeth; it cannot change or clip the
+finished body.
 
 ## Closed and open designs
 

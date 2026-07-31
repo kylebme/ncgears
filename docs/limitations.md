@@ -58,11 +58,17 @@ remnants remain unsuitable inputs.
 
 Root undercuts and other non-working interference are resolved by running the
 finished analytical pair through the requested motion, using each opposing gear
-as a cutter. On closed gears, cusp-free analytic spans that remain exposed on
-the arranged body are protected by one-sided material guards. Overlap may be
-removed from either gear outside those guards, including above the pitch curve
-for a nonconvex cusp loop. If an overlap is protected on both gears, the design
-is rejected. Open profiles retain the more conservative pitch-side root trim
+as a cutter. A nonzero `clearance_factor` is enforced on analytic dedenda by
+deepening them only when the nominal addendum/dedendum difference is too small.
+For a hybrid undercut, only the opposing gear's addendum-tip material is
+extended by the requested module-scaled distance. Working flanks are neither
+offset nor used as clearance cutters.
+
+On closed gears, cusp-free analytic spans that remain exposed on the arranged
+body are protected by one-sided material guards. Overlap may be removed from
+either gear outside those guards, including above the pitch curve for a
+nonconvex cusp loop. If an overlap is protected on both gears, the design is
+rejected. Open profiles retain the more conservative pitch-side root trim
 because their artificial endpoint closure faces are not periodic cutter stock.
 
 The analytic rounded rack-tip fillet remains the preferred closure. When it
@@ -71,13 +77,23 @@ initial stock and the opposing-gear pass generates the non-working undercut.
 Metadata distinguishes these cases with `hybrid_undercut_count` and
 `fillet_closure_mode`.
 
-For closed gears the rolling cutter repeats four staggered phase grids until
-sampled removed area converges. An open profile receives one four-grid sweep.
-Protected contact coverage is checked on the same staggered grid, and several
-off-grid phases additionally recover the first solid-contact angle on both
-sides of the requested pose. This catches grid-aligned errors, but it is a
-dense sampled verification rather than a formal interval-arithmetic proof over
-every real-valued phase.
+For closed gears the rolling cutter evaluates four interleaved phase grids
+against one common solid snapshot per pass, then repeats until sampled removed
+area converges. Using a common snapshot lets every offset refine the same
+cutter envelope instead of inheriting the first grid's coarse steps. All
+interleaved cuts are combined before removal. A hybrid clearance pass closes
+only the sub-phase gaps between sampled addendum-tip cuts, producing one smooth
+undercut envelope rather than preserving individual cutter-position marks. An
+open profile receives one four-grid sweep. Protected contact coverage is
+checked on the same staggered grid, and several off-grid phases additionally
+recover the first solid-contact angle on both sides of the requested pose. This
+catches grid-aligned errors, but it is a dense sampled verification rather than
+a formal interval-arithmetic proof over every real-valued phase.
+
+Clearance cutter and envelope arcs use a finer round-buffer tessellation than
+the numerical Boolean pad. The requested factor and its dimensional value,
+nominal and effective dedendum depths, and clearance-generation method are
+recorded in `metadata.json`.
 
 Increase `samples_per_radian` when:
 

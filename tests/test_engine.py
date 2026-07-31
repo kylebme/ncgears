@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from shapely.geometry import LineString, Point, Polygon
+from shapely.geometry import LineString, Point, Polygon, box
 
 import ncgears
 from ncgears._policy import (
@@ -180,6 +180,7 @@ def test_closed_motion_validation_cannot_alias_between_grid_points() -> None:
         addendum_factor=1.0,
         dedendum_factor=1.2,
         fillet_factor=0.3,
+        clearance_factor=0.0,
         domain_start=0.0,
         domain_end=2.0 * math.pi,
         active_start=0.0,
@@ -262,6 +263,34 @@ def test_analytic_involute_retains_exact_circular_root_depth(
     assert pair.metadata["rolling_nonworking_removed_area"] == pytest.approx(0.0)
 
 
+def test_clearance_deepens_analytic_dedendum_when_required(
+    tmp_path: Path,
+) -> None:
+    pair = ncgears.generate(
+        "phi",
+        name="circular_clearance",
+        teeth=20,
+        clearance_factor=0.3,
+        samples=1024,
+        samples_per_radian=20,
+        output_directory=tmp_path,
+    )
+
+    _assert_verified_pair(pair)
+    expected_dedendum = 1.3
+    expected_root_radius = 0.5 * pair.center_distance - expected_dedendum
+    assert np.min(np.linalg.norm(pair.drive_outline[:-1], axis=1)) == pytest.approx(
+        expected_root_radius,
+        abs=3e-5,
+    )
+    assert pair.metadata["requested_clearance_factor"] == pytest.approx(0.3)
+    assert pair.metadata["requested_clearance"] == pytest.approx(0.3)
+    assert pair.metadata["nominal_dedendum"] == pytest.approx(1.2)
+    assert pair.metadata["effective_dedendum"] == pytest.approx(expected_dedendum)
+    assert pair.metadata["rolling_clearance_applied"] is False
+    assert pair.metadata["clearance_generation_method"] == "analytic_dedendum"
+
+
 def test_closed_undercut_count_excludes_periodic_seam_flanks(
     tmp_path: Path,
 ) -> None:
@@ -285,6 +314,7 @@ def test_python_engine_solves_centrode_center_distance(tmp_path: Path) -> None:
         "1 + 0.08*cos(2*phi)",
         name="centrode_two_lobe",
         teeth=20,
+        clearance_factor=0.25,
         samples=1024,
         samples_per_radian=20,
         output_directory=tmp_path,
@@ -293,6 +323,7 @@ def test_python_engine_solves_centrode_center_distance(tmp_path: Path) -> None:
     _assert_verified_pair(pair)
     assert pair.metadata["input_mode"] == "drive_centrode"
     assert pair.metadata["centrode_reference_center_distance"] > 1.08
+    assert pair.metadata["effective_dedendum"] == pytest.approx(1.25)
     assert pair.ratio == pytest.approx(1.0, abs=1e-8)
     assert pair.metadata["generation_backend"] == ("hybrid_analytic_involute")
 
@@ -302,6 +333,7 @@ def test_python_engine_generates_open_segment(tmp_path: Path) -> None:
         "1.8*phi + 0.03*sin(phi)",
         name="open_segment",
         teeth=12,
+        clearance_factor=0.3,
         open_=True,
         drive_end=2.4,
         padding_pitches=2.5,
@@ -314,6 +346,8 @@ def test_python_engine_generates_open_segment(tmp_path: Path) -> None:
     assert pair.metadata["topology"] == "open"
     assert pair.metadata["generation_backend"] == ("hybrid_analytic_involute")
     assert pair.metadata["profile_family"] == "generalized_involute"
+    assert pair.metadata["requested_clearance_factor"] == pytest.approx(0.3)
+    assert pair.metadata["effective_dedendum"] == pytest.approx(1.3)
     assert pair.ratio == pytest.approx(
         (1.8 * 2.4 + 0.03 * math.sin(2.4)) / 2.4,
         abs=1e-7,
@@ -462,3 +496,102 @@ def test_nonconvex_cusps_become_hybrid_opposing_gear_undercuts(
     assert pair.metadata["rolling_nonworking_trim_pass_count"] >= 2
     assert pair.metadata["rolling_nonworking_removed_area"] > 0.0
     assert pair.metadata["minimum_protected_contact_pairs"] >= 1
+
+
+def test_rolling_cutter_does_not_leave_protected_flank_tip_fin(
+    tmp_path: Path,
+) -> None:
+    pair = ncgears.generate(
+        "phi - 0.7*sin(phi)",
+        name="protected_flank_tip_fin",
+        teeth=28,
+        samples=1024,
+        samples_per_radian=20,
+        output_directory=tmp_path,
+    )
+
+    _assert_verified_pair(pair)
+    assert pair.metadata["hybrid_undercut_count"] == 2
+    drive = Polygon(pair.drive_outline)
+    for height in np.linspace(0.52, 0.54, 5):
+        tip_section = drive.intersection(
+            LineString([(7.1, float(height)), (7.7, float(height))])
+        )
+        # The former pointwise mutual cut left a narrow, detached interval at
+        # the right end of these sections: the visible fin at the tooth tip.
+        assert isinstance(tip_section, LineString)
+
+    placed_driven = pair.placed_driven_outline
+    segments = np.diff(placed_driven, axis=0)
+    midpoints = 0.5 * (placed_driven[:-1] + placed_driven[1:])
+    undercut_region = (
+        (midpoints[:, 0] > 6.8)
+        & (midpoints[:, 0] < 7.5)
+        & (midpoints[:, 1] > 0.55)
+        & (midpoints[:, 1] < 0.75)
+    )
+    undercut_segments = segments[undercut_region]
+    near_vertical = undercut_segments[
+        np.abs(undercut_segments[:, 0]) < 0.3 * np.abs(undercut_segments[:, 1])
+    ]
+    # All staggered grids must refine one common cutter snapshot. Otherwise
+    # the first grid leaves roughly 0.014 mm risers on this undercut envelope.
+    assert np.max(np.linalg.norm(near_vertical, axis=1)) < 0.004
+
+
+def test_rolling_clearance_separates_smooth_undercut_surfaces(
+    tmp_path: Path,
+) -> None:
+    pair = ncgears.generate(
+        "phi - 0.7*sin(phi)",
+        name="rolling_undercut_clearance",
+        teeth=28,
+        clearance_factor=0.05,
+        samples=1024,
+        samples_per_radian=20,
+        output_directory=tmp_path,
+    )
+
+    _assert_verified_pair(pair)
+    assert pair.metadata["requested_clearance"] == pytest.approx(0.05)
+    assert pair.metadata["rolling_clearance_applied"] is True
+    assert pair.metadata["clearance_generation_method"] == (
+        "analytic_dedendum_with_addendum_tip_cutter_envelope"
+    )
+    drive_boundary = LineString(pair.drive_outline)
+    driven_boundary = LineString(pair.placed_driven_outline)
+    undercut_regions = (
+        box(6.85, 0.52, 7.5, 0.85),
+        box(6.85, -0.85, 7.5, -0.52),
+    )
+    for region in undercut_regions:
+        drive_undercut = drive_boundary.intersection(region)
+        driven_undercut = driven_boundary.intersection(region)
+        assert not drive_undercut.is_empty
+        assert not driven_undercut.is_empty
+        assert drive_undercut.distance(driven_undercut) >= 0.05
+
+    drive = Polygon(pair.drive_outline)
+    for height in np.linspace(0.48, 0.74, 53):
+        section = drive.intersection(
+            LineString([(6.0, float(height)), (7.75, float(height))])
+        )
+        # Clearance must not leave detached fins, slots, or preserved islands
+        # beside the exact working flank.
+        assert isinstance(section, LineString)
+
+    placed_driven = pair.placed_driven_outline
+    segments = np.diff(placed_driven, axis=0)
+    midpoints = 0.5 * (placed_driven[:-1] + placed_driven[1:])
+    angles = np.arctan2(segments[:, 1], segments[:, 0])
+    turns = np.abs(np.angle(np.exp(1j * (np.roll(angles, -1) - angles))))
+    smooth_region = (
+        (midpoints[:, 0] > 6.9)
+        & (midpoints[:, 0] < 7.4)
+        & (midpoints[:, 1] > 0.7)
+        & (midpoints[:, 1] < 0.82)
+    )
+    consecutive = smooth_region & np.roll(smooth_region, -1)
+    # A discrete virtual-cutter sweep left 80-degree teeth in this root. The
+    # closed sweep envelope must stay within its 11.25-degree arc resolution.
+    assert np.max(turns[consecutive]) < math.radians(12.0)

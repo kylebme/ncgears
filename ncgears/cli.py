@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 
 from ._policy import (
+    DEFAULT_CLEARANCE_FACTOR,
     DEFAULT_GIF_FPS,
     DEFAULT_GIF_FRAMES,
     DEFAULT_INPUT_SAMPLES,
@@ -38,6 +39,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--module", type=float, default=DEFAULT_MODULE)
     parser.add_argument(
         "--pressure-angle", type=float, default=DEFAULT_PRESSURE_ANGLE_DEG
+    )
+    parser.add_argument(
+        "--clearance-factor",
+        type=float,
+        default=DEFAULT_CLEARANCE_FACTOR,
+        help="minimum non-working clearance as a multiple of module",
     )
     parser.add_argument("--open", action="store_true", dest="open_")
     parser.add_argument("--drive-start", type=float, default=0.0)
@@ -88,6 +95,7 @@ def main(argv: list[str] | None = None) -> int:
         "teeth": args.teeth,
         "module": args.module,
         "pressure_angle_deg": args.pressure_angle,
+        "clearance_factor": args.clearance_factor,
         "drive_start": args.drive_start,
         "drive_end": args.drive_end,
         "period": args.period,

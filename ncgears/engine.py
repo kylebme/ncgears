@@ -36,6 +36,7 @@ from ._policy import (
     CENTRODE_CONVEXITY_CURVATURE_FACTOR,
     CENTRODE_FIDELITY_ALLOWANCE_MODULES,
     CENTRODE_OUTLINE_SAMPLES_PER_TOOTH,
+    CLEARANCE_BUFFER_QUADRANT_SEGMENTS,
     CONTACT_AREA_TOLERANCE_FACTOR,
     CONTACT_RECOVERY_PHASE_OFFSET,
     CONTACT_RECOVERY_PHASES_CLOSED,
@@ -155,6 +156,7 @@ class EngineConfig:
     addendum_factor: float
     dedendum_factor: float
     fillet_factor: float
+    clearance_factor: float
     domain_start: float
     domain_end: float
     active_start: float
@@ -560,6 +562,7 @@ def load_engine_config(
     addendum_factor: float,
     dedendum_factor: float,
     fillet_factor: float,
+    clearance_factor: float,
     domain_start: float,
     domain_end: float,
     active_start: float,
@@ -592,6 +595,7 @@ def load_engine_config(
         addendum_factor=addendum_factor,
         dedendum_factor=dedendum_factor,
         fillet_factor=fillet_factor,
+        clearance_factor=clearance_factor,
         domain_start=domain_start,
         domain_end=domain_end,
         active_start=active_start,
@@ -713,7 +717,15 @@ class _GearGenerator:
         self.closed = not config.open_
         self.alpha = math.radians(config.pressure_angle_deg)
         self.addendum = config.addendum_factor * config.module
-        self.dedendum = config.dedendum_factor * config.module
+        self.nominal_dedendum = config.dedendum_factor * config.module
+        self.clearance = config.clearance_factor * config.module
+        # The analytic rack closure already has a nominal addendum/dedendum
+        # difference. Deepen it only when that difference is smaller than the
+        # requested minimum clearance.
+        self.dedendum = max(
+            self.nominal_dedendum,
+            self.addendum + self.clearance,
+        )
         self.fillet_radius = config.fillet_factor * config.module
         self.motion = _QuinticSeries(
             config.samples[:, 1],
@@ -784,6 +796,8 @@ class _GearGenerator:
                 "Pressure angle must be between 0 and "
                 f"{MAX_PRESSURE_ANGLE_DEG:g} degrees"
             )
+        if not math.isfinite(self.clearance) or self.clearance < 0.0:
+            raise ValueError("Clearance factor must be finite and nonnegative")
         if not (
             self.addendum > 0.0
             and self.dedendum > self.fillet_radius
@@ -2770,16 +2784,34 @@ class _GearGenerator:
         driven: FloatArray,
         drive_flanks: tuple[_ProtectedFlankSpan, ...],
         driven_flanks: tuple[_ProtectedFlankSpan, ...],
-    ) -> tuple[FloatArray, FloatArray, int, float, float, float, int]:
+        *,
+        apply_clearance: bool,
+        drive_chord_error: float,
+        driven_chord_error: float,
+    ) -> tuple[
+        FloatArray,
+        FloatArray,
+        tuple[_ProtectedFlankSpan, ...],
+        tuple[_ProtectedFlankSpan, ...],
+        int,
+        float,
+        float,
+        float,
+        int,
+    ]:
         """Trim non-working interference by rolling the finished pair.
 
         On closed gears, retained analytic flanks and the connected support
         cores are protected. Any other overlapping material is eligible for
         removal, including a nonconvex cusp loop outside the pitch curve. Both
-        gears are updated from the same grid snapshot and the staggered grids
-        repeat to a sampled fixed point. Open profiles retain the historical
-        pitch-side-only, single-pass trim because their endpoint closures are
-        not periodic cutter stock.
+        gears and all staggered grids use the same per-pass snapshot, then the
+        combined cuts repeat to a sampled fixed point. Open profiles retain the
+        historical pitch-side-only, single-pass trim because their endpoint
+        closures are not periodic cutter stock. For hybrid undercuts, requested
+        clearance extends only the opposing addendum-tip material. The
+        interleaved samples are combined and closed into one cutter envelope
+        before removal; working flanks are never offset or used as clearance
+        cutters.
         """
 
         drive_geometry: Geometry = Polygon(drive[:-1])
@@ -2790,12 +2822,10 @@ class _GearGenerator:
         driven_core_guard = self._rolling_core_guard().intersection(driven_geometry)
         drive_exclusion = union_all([drive_flank_guard, drive_core_guard])
         driven_exclusion = union_all([driven_flank_guard, driven_core_guard])
-        drive_trim_zone = (
-            drive_geometry if self.closed else self._analytic_pitch_material(False)
-        )
-        driven_trim_zone = (
-            driven_geometry if self.closed else self._analytic_pitch_material(True)
-        )
+        drive_pitch_material = self._analytic_pitch_material(False)
+        driven_pitch_material = self._analytic_pitch_material(True)
+        drive_trim_zone = drive_geometry if self.closed else drive_pitch_material
+        driven_trim_zone = driven_geometry if self.closed else driven_pitch_material
         phase_count = (
             max(
                 ROLLING_MIN_PHASES,
@@ -2806,9 +2836,10 @@ class _GearGenerator:
         )
         overlap_tolerance = self._overlap_area_tolerance()
         classification_tolerance = overlap_tolerance
-        trim_clearance = _length_tolerance(
+        numerical_trim_clearance = _length_tolerance(
             self.config.module, ANALYTIC_CHORD_TOLERANCE_FACTOR
         )
+        rolling_clearance = self.clearance if apply_clearance else 0.0
         convergence_tolerance = ROLLING_CONVERGENCE_AREA_FACTOR * self.config.module**2
         psi_start = float(self._psi(self.active_start))
         initial_overlap = 0.0
@@ -2822,6 +2853,46 @@ class _GearGenerator:
             pass_count = pass_index + 1
             pass_removed_area = 0.0
             pass_maximum_overlap = 0.0
+            pass_drive_snapshot = drive_geometry
+            pass_driven_snapshot = driven_geometry
+            empty_geometry = Point(0.0, 0.0).buffer(0.0)
+            pass_clearance = rolling_clearance if pass_index == 0 else 0.0
+            if pass_clearance > 0.0:
+                drive_tip_material = pass_drive_snapshot.difference(
+                    drive_pitch_material
+                )
+                driven_tip_material = pass_driven_snapshot.difference(
+                    driven_pitch_material
+                )
+                drive_flank_source_exclusion = drive_flank_guard.buffer(
+                    pass_clearance + numerical_trim_clearance,
+                    quad_segs=CLEARANCE_BUFFER_QUADRANT_SEGMENTS,
+                )
+                driven_flank_source_exclusion = driven_flank_guard.buffer(
+                    pass_clearance + numerical_trim_clearance,
+                    quad_segs=CLEARANCE_BUFFER_QUADRANT_SEGMENTS,
+                )
+                pass_drive_clearance_shell = (
+                    drive_tip_material.buffer(
+                        pass_clearance,
+                        quad_segs=CLEARANCE_BUFFER_QUADRANT_SEGMENTS,
+                    )
+                    .difference(pass_drive_snapshot)
+                    .difference(drive_flank_source_exclusion)
+                )
+                pass_driven_clearance_shell = (
+                    driven_tip_material.buffer(
+                        pass_clearance,
+                        quad_segs=CLEARANCE_BUFFER_QUADRANT_SEGMENTS,
+                    )
+                    .difference(pass_driven_snapshot)
+                    .difference(driven_flank_source_exclusion)
+                )
+            else:
+                pass_drive_clearance_shell = empty_geometry
+                pass_driven_clearance_shell = empty_geometry
+            pass_drive_clearance_cuts: list[Geometry] = []
+            pass_driven_clearance_cuts: list[Geometry] = []
             for offset in ROLLING_STAGGER_OFFSETS:
                 fractions = (
                     (np.arange(phase_count) + offset) / phase_count
@@ -2838,9 +2909,20 @@ class _GearGenerator:
 
                 def phase_nonworking_cut(
                     fraction: float,
-                    current_drive: Geometry = drive_geometry,
-                    current_driven: Geometry = driven_geometry,
-                ) -> tuple[float, Geometry | None, Geometry | None, float]:
+                    current_drive: Geometry = pass_drive_snapshot,
+                    current_driven: Geometry = pass_driven_snapshot,
+                    drive_clearance_shell: Geometry = pass_drive_clearance_shell,
+                    driven_clearance_shell: Geometry = pass_driven_clearance_shell,
+                    empty_cut: Geometry = empty_geometry,
+                    clearance_distance: float = pass_clearance,
+                ) -> tuple[
+                    float,
+                    Geometry | None,
+                    Geometry | None,
+                    Geometry | None,
+                    Geometry | None,
+                    float,
+                ]:
                     phi = self.active_start + (
                         self.active_end - self.active_start
                     ) * float(fraction)
@@ -2857,8 +2939,8 @@ class _GearGenerator:
                     )
                     overlap = current_drive.intersection(placed_driven)
                     area = float(overlap.area)
-                    if area <= overlap_tolerance:
-                        return area, None, None, 0.0
+                    if area <= overlap_tolerance and clearance_distance <= 0.0:
+                        return area, None, None, None, None, 0.0
                     placed_driven_exclusion = self._place_geometry(
                         driven_exclusion,
                         relative_angle,
@@ -2866,12 +2948,65 @@ class _GearGenerator:
                         center_y,
                     )
                     if self.closed:
-                        protected_on_both = overlap.intersection(
+                        drive_parts: list[Geometry] = []
+                        driven_parts: list[Geometry] = []
+                        assignment_tolerance = (
+                            CONTACT_AREA_TOLERANCE_FACTOR * self.config.module**2
+                        )
+                        unremovable = overlap.intersection(
                             drive_exclusion
                         ).intersection(placed_driven_exclusion)
-                        unremovable = protected_on_both
-                        drive_overlap = overlap.difference(drive_exclusion)
-                        driven_overlap = overlap.difference(placed_driven_exclusion)
+                        for component in _polygon_parts(overlap):
+                            # A pointwise subtraction can hollow out the material
+                            # immediately behind a protected flank. When the same
+                            # overlap component contains no protected material on
+                            # the other member, assign the complete cut to that
+                            # other member instead. Requiring an exterior
+                            # connection prevents a one-sided cut from creating
+                            # an internal hole that the single-ring outline
+                            # format cannot represent.
+                            drive_protected_area = float(
+                                component.intersection(drive_exclusion).area
+                            )
+                            driven_protected_area = float(
+                                component.intersection(placed_driven_exclusion).area
+                            )
+                            if (
+                                driven_protected_area <= assignment_tolerance
+                                and drive_protected_area
+                                > driven_protected_area + assignment_tolerance
+                                and float(
+                                    component.boundary.intersection(
+                                        placed_driven.boundary
+                                    ).length
+                                )
+                                > numerical_trim_clearance
+                            ):
+                                driven_parts.append(
+                                    component.difference(placed_driven_exclusion)
+                                )
+                                continue
+                            elif (
+                                drive_protected_area <= assignment_tolerance
+                                and driven_protected_area
+                                > drive_protected_area + assignment_tolerance
+                                and float(
+                                    component.boundary.intersection(
+                                        current_drive.boundary
+                                    ).length
+                                )
+                                > numerical_trim_clearance
+                            ):
+                                drive_parts.append(
+                                    component.difference(drive_exclusion)
+                                )
+                                continue
+                            drive_parts.append(component.difference(drive_exclusion))
+                            driven_parts.append(
+                                component.difference(placed_driven_exclusion)
+                            )
+                        drive_overlap = union_all(drive_parts)
+                        driven_overlap = union_all(driven_parts)
                     else:
                         placed_driven_trim_zone = self._place_geometry(
                             driven_trim_zone,
@@ -2889,6 +3024,29 @@ class _GearGenerator:
                         unremovable = outside_root_zones
                         drive_overlap = drive_root_overlap
                         driven_overlap = driven_root_overlap
+                    if clearance_distance > 0.0:
+                        placed_driven_clearance_shell = self._place_geometry(
+                            driven_clearance_shell,
+                            relative_angle,
+                            center_x,
+                            center_y,
+                        )
+                        drive_clearance_overlap = current_drive.intersection(
+                            placed_driven_clearance_shell
+                        ).intersection(drive_trim_zone)
+                        driven_clearance_overlap = placed_driven.intersection(
+                            drive_clearance_shell
+                        ).intersection(
+                            self._place_geometry(
+                                driven_trim_zone,
+                                relative_angle,
+                                center_x,
+                                center_y,
+                            )
+                        )
+                    else:
+                        drive_clearance_overlap = empty_cut
+                        driven_clearance_overlap = empty_cut
                     unremovable_area = float(unremovable.area)
                     local_drive_cut = (
                         make_valid(drive_overlap)
@@ -2907,10 +3065,29 @@ class _GearGenerator:
                         if not driven_overlap.is_empty
                         else None
                     )
+                    local_drive_clearance_cut = (
+                        make_valid(drive_clearance_overlap)
+                        if not drive_clearance_overlap.is_empty
+                        else None
+                    )
+                    local_driven_clearance_cut = (
+                        make_valid(
+                            self._unplace_geometry(
+                                make_valid(driven_clearance_overlap),
+                                relative_angle,
+                                center_x,
+                                center_y,
+                            )
+                        )
+                        if not driven_clearance_overlap.is_empty
+                        else None
+                    )
                     return (
                         area,
                         local_drive_cut,
                         local_driven_cut,
+                        local_drive_clearance_cut,
+                        local_driven_clearance_cut,
                         unremovable_area,
                     )
 
@@ -2925,6 +3102,8 @@ class _GearGenerator:
                         area,
                         drive_overlap,
                         driven_overlap,
+                        drive_clearance_overlap,
+                        driven_clearance_overlap,
                         unremovable_area,
                     ) in phase_results:
                         grid_maximum = max(grid_maximum, area)
@@ -2939,42 +3118,147 @@ class _GearGenerator:
                             drive_cuts.append(drive_overlap)
                         if driven_overlap is not None:
                             driven_cuts.append(driven_overlap)
+                        if drive_clearance_overlap is not None:
+                            pass_drive_clearance_cuts.append(drive_clearance_overlap)
+                        if driven_clearance_overlap is not None:
+                            pass_driven_clearance_cuts.append(driven_clearance_overlap)
                 total_phases += len(fractions)
                 if pass_index == 0 and offset == 0.0:
                     initial_overlap = grid_maximum
                 pass_maximum_overlap = max(pass_maximum_overlap, grid_maximum)
-                if not drive_cuts and not driven_cuts:
-                    continue
-                before_drive = float(drive_geometry.area)
-                before_driven = float(driven_geometry.area)
-                if drive_cuts:
-                    drive_cut = union_all(drive_cuts).buffer(
-                        trim_clearance,
+                if drive_cuts or driven_cuts:
+                    before_drive = float(drive_geometry.area)
+                    before_driven = float(driven_geometry.area)
+                    if drive_cuts:
+                        drive_cut = (
+                            union_all(drive_cuts)
+                            .buffer(
+                                numerical_trim_clearance,
+                                quad_segs=TRIM_BUFFER_QUADRANT_SEGMENTS,
+                            )
+                            .difference(drive_exclusion)
+                            .intersection(drive_trim_zone)
+                        )
+                        drive_geometry = drive_geometry.difference(drive_cut)
+                    if driven_cuts:
+                        driven_cut = (
+                            union_all(driven_cuts)
+                            .buffer(
+                                numerical_trim_clearance,
+                                quad_segs=TRIM_BUFFER_QUADRANT_SEGMENTS,
+                            )
+                            .difference(driven_exclusion)
+                            .intersection(driven_trim_zone)
+                        )
+                        driven_geometry = driven_geometry.difference(driven_cut)
+                    drive_geometry = _clean_polygon(drive_geometry)
+                    driven_geometry = _clean_polygon(driven_geometry)
+                    removed_area = (
+                        before_drive
+                        - float(drive_geometry.area)
+                        + before_driven
+                        - float(driven_geometry.area)
+                    )
+                    pass_removed_area += removed_area
+                    total_removed_area += removed_area
+
+            if not (
+                pass_removed_area > 0.0
+                or pass_drive_clearance_cuts
+                or pass_driven_clearance_cuts
+            ):
+                remaining_overlap = pass_maximum_overlap
+                break
+
+            def apply_clearance_envelope(
+                geometry: Geometry,
+                cuts: list[Geometry],
+                flanks: tuple[_ProtectedFlankSpan, ...],
+                core_guard: Geometry,
+                trim_zone: Geometry,
+                chord_error: float,
+            ) -> tuple[Geometry, tuple[_ProtectedFlankSpan, ...]]:
+                if not cuts:
+                    return geometry, flanks
+                raw_cut = (
+                    union_all(cuts)
+                    .buffer(
+                        rolling_clearance,
+                        quad_segs=CLEARANCE_BUFFER_QUADRANT_SEGMENTS,
+                    )
+                    .buffer(
+                        -rolling_clearance,
+                        quad_segs=CLEARANCE_BUFFER_QUADRANT_SEGMENTS,
+                    )
+                    .buffer(
+                        numerical_trim_clearance,
                         quad_segs=TRIM_BUFFER_QUADRANT_SEGMENTS,
                     )
-                    if self.closed:
-                        drive_cut = drive_cut.difference(drive_exclusion)
-                    drive_cut = drive_cut.intersection(drive_trim_zone)
-                    drive_geometry = drive_geometry.difference(drive_cut)
-                if driven_cuts:
-                    driven_cut = union_all(driven_cuts).buffer(
-                        trim_clearance,
-                        quad_segs=TRIM_BUFFER_QUADRANT_SEGMENTS,
-                    )
-                    if self.closed:
-                        driven_cut = driven_cut.difference(driven_exclusion)
-                    driven_cut = driven_cut.intersection(driven_trim_zone)
-                    driven_geometry = driven_geometry.difference(driven_cut)
-                drive_geometry = _clean_polygon(drive_geometry)
-                driven_geometry = _clean_polygon(driven_geometry)
-                removed_area = (
-                    before_drive
-                    - float(drive_geometry.area)
-                    + before_driven
-                    - float(driven_geometry.area)
+                    .intersection(trim_zone)
                 )
-                pass_removed_area += removed_area
-                total_removed_area += removed_area
+                # First expose where the clearance envelope naturally meets
+                # each analytic flank. Retain only the tip-connected working
+                # portion; preserving the former root endpoint would leave a
+                # thin attached spur between the new root and the old flank.
+                provisional = _clean_polygon(
+                    geometry.difference(raw_cut.difference(core_guard))
+                )
+                provisional_outline = _outline(
+                    provisional,
+                    _length_tolerance(
+                        self.config.module,
+                        GEOMETRY_LENGTH_TOLERANCE_FACTOR,
+                    ),
+                )
+                clipped_flanks, _ = self._clip_protected_flanks_to_boundary(
+                    flanks,
+                    provisional_outline,
+                    chord_error=chord_error,
+                )
+                flank_guard = self._protected_flank_guard(
+                    clipped_flanks,
+                    geometry,
+                )
+                exclusion = union_all([flank_guard, core_guard])
+                cleared = geometry.difference(raw_cut.difference(exclusion))
+                return _clean_polygon(cleared), clipped_flanks
+
+            before_clearance_drive = float(drive_geometry.area)
+            before_clearance_driven = float(driven_geometry.area)
+            drive_geometry, drive_flanks = apply_clearance_envelope(
+                drive_geometry,
+                pass_drive_clearance_cuts,
+                drive_flanks,
+                drive_core_guard,
+                drive_trim_zone,
+                drive_chord_error,
+            )
+            driven_geometry, driven_flanks = apply_clearance_envelope(
+                driven_geometry,
+                pass_driven_clearance_cuts,
+                driven_flanks,
+                driven_core_guard,
+                driven_trim_zone,
+                driven_chord_error,
+            )
+            clearance_removed_area = (
+                before_clearance_drive
+                - float(drive_geometry.area)
+                + before_clearance_driven
+                - float(driven_geometry.area)
+            )
+            pass_removed_area += clearance_removed_area
+            total_removed_area += clearance_removed_area
+            drive_flank_guard = self._protected_flank_guard(
+                drive_flanks,
+                drive_geometry,
+            )
+            driven_flank_guard = self._protected_flank_guard(
+                driven_flanks,
+                driven_geometry,
+            )
+            drive_exclusion = union_all([drive_flank_guard, drive_core_guard])
+            driven_exclusion = union_all([driven_flank_guard, driven_core_guard])
             remaining_overlap = pass_maximum_overlap
             if not self.closed or pass_removed_area <= convergence_tolerance:
                 break
@@ -2995,6 +3279,8 @@ class _GearGenerator:
         return (
             drive_outline,
             driven_outline,
+            drive_flanks,
+            driven_flanks,
             total_phases,
             initial_overlap,
             remaining_overlap,
@@ -3315,6 +3601,8 @@ class _GearGenerator:
         (
             drive,
             driven,
+            trimmed_drive_flanks,
+            trimmed_driven_flanks,
             rolling_trim_phase_count,
             rolling_initial_overlap,
             rolling_sampled_overlap,
@@ -3325,6 +3613,17 @@ class _GearGenerator:
             driven,
             drive_result.protected_flanks,
             driven_result.protected_flanks,
+            apply_clearance=hybrid_undercut_count > 0,
+            drive_chord_error=drive_result.maximum_chord_error,
+            driven_chord_error=driven_result.maximum_chord_error,
+        )
+        drive_result = replace(
+            drive_result,
+            protected_flanks=trimmed_drive_flanks,
+        )
+        driven_result = replace(
+            driven_result,
+            protected_flanks=trimmed_driven_flanks,
         )
         posttrim_drive_flank_error, posttrim_drive_regular_factor = (
             self._verify_protected_flanks(
@@ -3463,6 +3762,18 @@ class _GearGenerator:
             "average_angular_ratio": self.average_ratio,
             "module": self.config.module,
             "pressure_angle_deg": self.config.pressure_angle_deg,
+            "requested_clearance_factor": self.config.clearance_factor,
+            "requested_clearance": self.clearance,
+            "nominal_dedendum": self.nominal_dedendum,
+            "effective_dedendum": self.dedendum,
+            "rolling_clearance_applied": (
+                self.clearance > 0.0 and hybrid_undercut_count > 0
+            ),
+            "clearance_generation_method": (
+                "analytic_dedendum_with_addendum_tip_cutter_envelope"
+                if self.clearance > 0.0 and hybrid_undercut_count > 0
+                else "analytic_dedendum"
+            ),
             "total_integral": self.total_integral,
             "center_distance": self.center_distance,
             "undercut_curvature_limit": self.curvature_limit,

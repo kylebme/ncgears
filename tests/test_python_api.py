@@ -59,6 +59,7 @@ def test_removed_profile_backends_are_not_public_options() -> None:
         parameters = inspect.signature(frontend).parameters
         assert "profile" not in parameters
         assert "cycloidal_rolling_factor" not in parameters
+        assert "clearance_factor" in parameters
 
     assert "--profile" not in build_parser().format_help()
 
@@ -212,6 +213,12 @@ def test_cli_accepts_interactive_plot_option() -> None:
     assert args.plot is True
 
 
+def test_cli_accepts_module_scaled_clearance() -> None:
+    args = build_parser().parse_args(["phi", "--clearance-factor", "0.075"])
+
+    assert args.clearance_factor == pytest.approx(0.075)
+
+
 def test_transmission_frontend_samples_motion_law(tmp_path: Path) -> None:
     sentinel = object()
     with patch("ncgears.api._run_generator", return_value=sentinel) as run:
@@ -221,6 +228,7 @@ def test_transmission_frontend_samples_motion_law(tmp_path: Path) -> None:
             teeth=20,
             samples=1024,
             output_directory=tmp_path,
+            clearance_factor=0.075,
             plot=True,
         )
 
@@ -234,6 +242,7 @@ def test_transmission_frontend_samples_motion_law(tmp_path: Path) -> None:
     assert np.min(table[:, 2]) > 0.0
     assert run.call_args.kwargs["cycle_delta"] == pytest.approx(2.0 * math.pi)
     assert run.call_args.kwargs["active_end"] == pytest.approx(2.0 * math.pi)
+    assert run.call_args.kwargs["clearance_factor"] == pytest.approx(0.075)
     assert run.call_args.kwargs["plot"] is True
 
 
@@ -245,6 +254,7 @@ def test_centrode_frontend_samples_radius_and_derivatives(tmp_path: Path) -> Non
             teeth=20,
             samples=1024,
             output_directory=tmp_path,
+            clearance_factor=0.125,
         )
 
     table = np.loadtxt(
@@ -257,6 +267,7 @@ def test_centrode_frontend_samples_radius_and_derivatives(tmp_path: Path) -> Non
     assert table[0, 2] == pytest.approx(0.0)
     assert table[0, 3] == pytest.approx(-0.32)
     assert run.call_args.kwargs["input_flag"] == "--centrode-csv"
+    assert run.call_args.kwargs["clearance_factor"] == pytest.approx(0.125)
 
 
 @pytest.mark.parametrize(
@@ -285,3 +296,8 @@ def test_result_name_cannot_escape_output_directory(tmp_path: Path) -> None:
             samples=1024,
             output_directory=tmp_path,
         )
+
+
+def test_negative_clearance_is_rejected() -> None:
+    with pytest.raises(ValueError, match="clearance_factor"):
+        ncgears.generate("phi", clearance_factor=-0.01)

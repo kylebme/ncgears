@@ -17,6 +17,9 @@ DEFAULT_PRESSURE_ANGLE_DEG = 20.0
 DEFAULT_ADDENDUM_FACTOR = 1.0
 DEFAULT_DEDENDUM_FACTOR = 1.2
 DEFAULT_FILLET_FACTOR = 0.3
+# Minimum requested separation between mating non-working surfaces, expressed
+# in modules. Zero preserves the historical geometry unless the user opts in.
+DEFAULT_CLEARANCE_FACTOR = 0.0
 DEFAULT_INPUT_SAMPLES = 8192
 DEFAULT_PADDING_PITCHES = 7.0
 DEFAULT_SAMPLES_PER_RADIAN = 110
@@ -129,7 +132,10 @@ PITCH_MASK_BUFFER_QUADRANT_SEGMENTS = 96
 # fractions of one grid cell. They reduce phase-grid alignment risk, but are
 # still a sampled check and are reported as such in metadata.
 ROLLING_MIN_PHASES = 96
-ROLLING_PHASES_PER_TOOTH = 4
+# Each pass evaluates four interleaved grids from one common solid snapshot.
+# Sixteen base phases per tooth keep the resulting cutter-envelope scallops
+# below a few micrometres at module 1 instead of leaving visible stair steps.
+ROLLING_PHASES_PER_TOOTH = 16
 ROLLING_STAGGER_OFFSETS = (0.0, 0.5, 0.25, 0.75)
 VERIFICATION_MIN_CLOSED_PHASES = 64
 VERIFICATION_MIN_OPEN_PHASES = 48
@@ -147,9 +153,14 @@ CONTACT_SEARCH_INITIAL_ANGLE = 1e-5
 CONTACT_SEARCH_MAX_ANGLE = math.radians(5.0)
 CONTACT_SEARCH_ANGLE_TOLERANCE = 1e-9
 TRIM_BUFFER_QUADRANT_SEGMENTS = 2
+# Requested clearance is a user-visible manufacturing surface rather than a
+# numerical Boolean pad. Resolve its round offset corners to sub-micrometre
+# chord error at the common 0.05-module setting.
+CLEARANCE_BUFFER_QUADRANT_SEGMENTS = 8
 # One-sided material guards protect retained analytic flanks during mutual
-# rolling cuts.  Make the guard wider than the Boolean trim clearance so the
-# latter can never reach a retained flank through roundoff.
+# rolling cuts. Make the guard wider than the numerical Boolean pad so
+# roundoff cannot reach a retained flank; requested clearance is explicitly
+# subtracted from this protected region.
 PROTECTED_FLANK_GUARD_CHORD_FACTORS = 4.0
 PROTECTED_CONTACT_RESIDUAL_FACTOR = 1e-6
 ROLLING_MAX_PASSES = 8

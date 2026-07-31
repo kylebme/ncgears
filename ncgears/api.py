@@ -13,6 +13,7 @@ import sympy as sp
 
 from ._policy import (
     DEFAULT_ADDENDUM_FACTOR,
+    DEFAULT_CLEARANCE_FACTOR,
     DEFAULT_DEDENDUM_FACTOR,
     DEFAULT_FILLET_FACTOR,
     DEFAULT_INPUT_SAMPLES,
@@ -107,6 +108,7 @@ def _validate_common(
     addendum_factor: float,
     dedendum_factor: float,
     fillet_factor: float,
+    clearance_factor: float,
     drive_start: float,
     drive_end: float,
     period: float,
@@ -134,6 +136,8 @@ def _validate_common(
         )
     if dedendum_factor <= fillet_factor:
         raise ValueError("dedendum_factor must exceed fillet_factor")
+    if not math.isfinite(clearance_factor) or clearance_factor < 0.0:
+        raise ValueError("clearance_factor must be finite and nonnegative")
     if not drive_start < drive_end:
         raise ValueError("drive_start must be less than drive_end")
     if period <= 0.0:
@@ -176,6 +180,7 @@ def _run_generator(
     addendum_factor: float,
     dedendum_factor: float,
     fillet_factor: float,
+    clearance_factor: float,
     domain_start: float,
     domain_end: float,
     active_start: float,
@@ -206,6 +211,7 @@ def _run_generator(
             addendum_factor=addendum_factor,
             dedendum_factor=dedendum_factor,
             fillet_factor=fillet_factor,
+            clearance_factor=clearance_factor,
             domain_start=domain_start,
             domain_end=domain_end,
             active_start=active_start,
@@ -265,6 +271,7 @@ def generate_from_transmission(
     addendum_factor: float = DEFAULT_ADDENDUM_FACTOR,
     dedendum_factor: float = DEFAULT_DEDENDUM_FACTOR,
     fillet_factor: float = DEFAULT_FILLET_FACTOR,
+    clearance_factor: float = DEFAULT_CLEARANCE_FACTOR,
     drive_start: float = 0.0,
     drive_end: float = 2.0 * math.pi,
     period: float = 2.0 * math.pi,
@@ -283,6 +290,8 @@ def generate_from_transmission(
     driven angle. For example, ``"phi - 0.08*sin(2*phi)"`` produces a smooth
     variable-speed 1:1 pair. The returned :class:`GearPair` contains NumPy
     outlines, verification metadata, preview rendering, and SVG/DXF exports.
+    ``clearance_factor`` requests a minimum non-working separation in modules;
+    it does not offset the conjugate working flanks.
     """
 
     _validate_common(
@@ -293,6 +302,7 @@ def generate_from_transmission(
         addendum_factor=addendum_factor,
         dedendum_factor=dedendum_factor,
         fillet_factor=fillet_factor,
+        clearance_factor=clearance_factor,
         drive_start=drive_start,
         drive_end=drive_end,
         period=period,
@@ -385,6 +395,7 @@ def generate_from_transmission(
         addendum_factor=addendum_factor,
         dedendum_factor=dedendum_factor,
         fillet_factor=fillet_factor,
+        clearance_factor=clearance_factor,
         domain_start=domain_start,
         domain_end=domain_end,
         active_start=active_start,
@@ -411,6 +422,7 @@ def generate_from_centrode(
     addendum_factor: float = DEFAULT_ADDENDUM_FACTOR,
     dedendum_factor: float = DEFAULT_DEDENDUM_FACTOR,
     fillet_factor: float = DEFAULT_FILLET_FACTOR,
+    clearance_factor: float = DEFAULT_CLEARANCE_FACTOR,
     drive_start: float = 0.0,
     drive_end: float = 2.0 * math.pi,
     period: float = 2.0 * math.pi,
@@ -430,6 +442,8 @@ def generate_from_centrode(
     The radius expression may use arbitrary units. It is scaled so the drive
     pitch length equals ``teeth * pi * module``. When no reference center
     distance is supplied, ncgears solves one for ``target_cycle_delta``.
+    ``clearance_factor`` requests a minimum non-working separation in modules;
+    it does not offset the conjugate working flanks.
     """
 
     _validate_common(
@@ -440,6 +454,7 @@ def generate_from_centrode(
         addendum_factor=addendum_factor,
         dedendum_factor=dedendum_factor,
         fillet_factor=fillet_factor,
+        clearance_factor=clearance_factor,
         drive_start=drive_start,
         drive_end=drive_end,
         period=period,
@@ -514,6 +529,7 @@ def generate_from_centrode(
         addendum_factor=addendum_factor,
         dedendum_factor=dedendum_factor,
         fillet_factor=fillet_factor,
+        clearance_factor=clearance_factor,
         domain_start=domain_start,
         domain_end=domain_end,
         active_start=active_start,
