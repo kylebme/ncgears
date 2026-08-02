@@ -72,12 +72,21 @@ Metadata distinguishes these cases with `hybrid_undercut_count` and
 `fillet_closure_mode`.
 
 For closed gears the rolling cutter repeats four staggered phase grids until
-sampled removed area converges. An open profile receives one four-grid sweep.
+sampled removed area converges. A hybrid undercut uses at least 24 poses per
+tooth on each grid, the same per-grid floor as the v0.2.1 Boolean generator;
+`samples_per_radian` can raise that floor further. The accumulated cuts are
+morphologically closed over 0.00175 module, then unioned with the original
+exact cuts before subtraction. This fills narrow pose-to-pose scallops without
+adding global backlash or weakening the conservative interference removal.
+Short GEOS overlay edges that reverse direction are also removed below the
+analytic chord-error budget. An open profile receives one four-grid sweep.
+
 Protected contact coverage is checked on the same staggered grid, and several
 off-grid phases additionally recover the first solid-contact angle on both
 sides of the requested pose. This catches grid-aligned errors, but it is a
 dense sampled verification rather than a formal interval-arithmetic proof over
-every real-valued phase.
+every real-valued phase. Metadata records the base and effective phase counts,
+maximum angular step, and cut-closing distance.
 
 Increase `samples_per_radian` when:
 

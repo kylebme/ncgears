@@ -69,6 +69,9 @@ CENTRODE_OUTLINE_SAMPLES_PER_TOOTH = 128
 GEOMETRY_LENGTH_TOLERANCE_FACTOR = 2e-7
 OUTLINE_DUPLICATE_TOLERANCE_FRACTION = 0.05
 OUTLINE_COLLINEAR_TOLERANCE_FRACTION = 0.02
+# Keep the backtracking-edge threshold below the analytic chord budget; smooth
+# analytic vertices and genuine longer concave features remain untouched.
+OUTLINE_BACKTRACK_TOLERANCE_MULTIPLIER = 100.0
 ANALYTIC_CHORD_TOLERANCE_FACTOR = 2.5e-5
 ANALYTIC_CHORD_ACCEPTANCE_SLACK = 1.2
 ANALYTIC_JOIN_TOLERANCE_FACTOR = 1e-10
@@ -130,6 +133,9 @@ PITCH_MASK_BUFFER_QUADRANT_SEGMENTS = 96
 # still a sampled check and are reported as such in metadata.
 ROLLING_MIN_PHASES = 96
 ROLLING_PHASES_PER_TOOTH = 4
+# Match the per-grid minimum used by the v0.2.1 Boolean generator when a
+# sacrificial hybrid connector actually needs a cutter-generated undercut.
+HYBRID_ROLLING_PHASES_PER_TOOTH = 24
 ROLLING_STAGGER_OFFSETS = (0.0, 0.5, 0.25, 0.75)
 VERIFICATION_MIN_CLOSED_PHASES = 64
 VERIFICATION_MIN_OPEN_PHASES = 48
@@ -148,6 +154,13 @@ CONTACT_SEARCH_INITIAL_ANGLE = 1e-5
 CONTACT_SEARCH_MAX_ANGLE = math.radians(5.0)
 CONTACT_SEARCH_ANGLE_TOLERANCE = 1e-9
 TRIM_BUFFER_QUADRANT_SEGMENTS = 2
+# The v0.2.1 conjugate cutter used a 0.00175-module conservative expansion.
+# Closing the hybrid pass's accumulated non-working cuts on that same scale
+# fills pose-to-pose scallops without expanding the complete opposing gear at
+# every working contact.
+ROLLING_CUT_CLOSING_FACTOR = 1.75e-3
+# Keep the regularization arc faceting below the analytic chord budget.
+ROLLING_CUT_BUFFER_QUADRANT_SEGMENTS = 8
 # One-sided material guards protect retained analytic flanks during mutual
 # rolling cuts.  Make the guard wider than the Boolean trim clearance so the
 # latter can never reach a retained flank through roundoff.

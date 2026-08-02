@@ -52,6 +52,7 @@ from ._policy import (
     FLOAT_COMPARISON_ULPS,
     GEOMETRY_LENGTH_TOLERANCE_FACTOR,
     HYBRID_CUSP_CLEARANCE_FACTOR,
+    HYBRID_ROLLING_PHASES_PER_TOOTH,
     INTEGRATION_INTERVAL_COUNT,
     INTERSECTION_CANDIDATE_OFFSET_WEIGHT,
     INTERSECTION_CONTACT_EXCLUSION_PITCHES,
@@ -81,6 +82,7 @@ from ._policy import (
     MIN_TEETH,
     MINIMUM_PITCH_AREA_FRACTION,
     OPEN_ANALYTIC_BACKING_RADIUS_PITCH_FACTOR,
+    OUTLINE_BACKTRACK_TOLERANCE_MULTIPLIER,
     OUTLINE_COLLINEAR_TOLERANCE_FRACTION,
     OUTLINE_DUPLICATE_TOLERANCE_FRACTION,
     OVERLAP_AREA_TOLERANCE_FACTOR,
@@ -94,6 +96,8 @@ from ._policy import (
     PROTECTED_FLANK_GUARD_CHORD_FACTORS,
     RACK_MIN_TIP_THICKNESS_FACTOR,
     ROLLING_CONVERGENCE_AREA_FACTOR,
+    ROLLING_CUT_BUFFER_QUADRANT_SEGMENTS,
+    ROLLING_CUT_CLOSING_FACTOR,
     ROLLING_MAX_PASSES,
     ROLLING_MIN_PHASES,
     ROLLING_PHASES_PER_TOOTH,
@@ -500,11 +504,24 @@ def _outline(polygon: Polygon, tolerance: float) -> FloatArray:
             incoming[:, 0] * outgoing[:, 1] - incoming[:, 1] * outgoing[:, 0]
         )
         forward = np.einsum("ij,ij->i", incoming, outgoing) >= 0.0
-        removable = (
+        collinear = (
             forward
             & (lengths > 0.0)
             & (twice_area < tolerance * OUTLINE_COLLINEAR_TOLERANCE_FRACTION * lengths)
         )
+        # Overlay of many almost coincident cutter poses can leave a short
+        # edge that doubles back along the undercut before continuing. GEOS
+        # considers the resulting hairpin a valid exterior, so collinearity
+        # cleanup alone cannot remove it. Delete the vertex at the start of
+        # only those reversing edges whose length remains below the analytic
+        # chord-error budget.
+        outgoing_lengths = np.linalg.norm(outgoing, axis=1)
+        short_backtrack = (
+            ~forward
+            & (outgoing_lengths > 0.0)
+            & (outgoing_lengths <= tolerance * OUTLINE_BACKTRACK_TOLERANCE_MULTIPLIER)
+        )
+        removable = collinear | short_backtrack
         changed = bool(np.any(removable))
         keep = ~removable
         points = points[keep]
@@ -2770,6 +2787,9 @@ class _GearGenerator:
         driven: FloatArray,
         drive_flanks: tuple[_ProtectedFlankSpan, ...],
         driven_flanks: tuple[_ProtectedFlankSpan, ...],
+        *,
+        samples_per_radian: int,
+        has_hybrid_undercut: bool,
     ) -> tuple[FloatArray, FloatArray, int, float, float, float, int]:
         """Trim non-working interference by rolling the finished pair.
 
@@ -2796,13 +2816,23 @@ class _GearGenerator:
         driven_trim_zone = (
             driven_geometry if self.closed else self._analytic_pitch_material(True)
         )
-        phase_count = (
-            max(
-                ROLLING_MIN_PHASES,
-                ROLLING_PHASES_PER_TOOTH * max(self.drive_teeth, self.driven_teeth),
-            )
-            if self.closed
-            else ROLLING_MIN_PHASES
+        phase_count = max(
+            ROLLING_MIN_PHASES,
+            (
+                (
+                    HYBRID_ROLLING_PHASES_PER_TOOTH
+                    if has_hybrid_undercut
+                    else ROLLING_PHASES_PER_TOOTH
+                )
+                * max(self.drive_teeth, self.driven_teeth)
+                if self.closed
+                else 0
+            ),
+            (
+                math.ceil(abs(self.active_end - self.active_start) * samples_per_radian)
+                if has_hybrid_undercut
+                else 0
+            ),
         )
         overlap_tolerance = self._overlap_area_tolerance()
         classification_tolerance = overlap_tolerance
@@ -2816,6 +2846,23 @@ class _GearGenerator:
         total_removed_area = 0.0
         total_phases = 0
         pass_count = 0
+        cut_closing = _length_tolerance(self.config.module, ROLLING_CUT_CLOSING_FACTOR)
+
+        def regularized_cut(cuts: list[Geometry]) -> Geometry:
+            raw_cut = union_all(cuts)
+            closed_cut = make_valid(
+                raw_cut.buffer(
+                    cut_closing,
+                    quad_segs=ROLLING_CUT_BUFFER_QUADRANT_SEGMENTS,
+                ).buffer(
+                    -cut_closing,
+                    quad_segs=ROLLING_CUT_BUFFER_QUADRANT_SEGMENTS,
+                )
+            )
+            return union_all([raw_cut, closed_cut]).buffer(
+                trim_clearance,
+                quad_segs=TRIM_BUFFER_QUADRANT_SEGMENTS,
+            )
 
         maximum_passes = ROLLING_MAX_PASSES if self.closed else 1
         for pass_index in range(maximum_passes):
@@ -2948,19 +2995,13 @@ class _GearGenerator:
                 before_drive = float(drive_geometry.area)
                 before_driven = float(driven_geometry.area)
                 if drive_cuts:
-                    drive_cut = union_all(drive_cuts).buffer(
-                        trim_clearance,
-                        quad_segs=TRIM_BUFFER_QUADRANT_SEGMENTS,
-                    )
+                    drive_cut = regularized_cut(drive_cuts)
                     if self.closed:
                         drive_cut = drive_cut.difference(drive_exclusion)
                     drive_cut = drive_cut.intersection(drive_trim_zone)
                     drive_geometry = drive_geometry.difference(drive_cut)
                 if driven_cuts:
-                    driven_cut = union_all(driven_cuts).buffer(
-                        trim_clearance,
-                        quad_segs=TRIM_BUFFER_QUADRANT_SEGMENTS,
-                    )
+                    driven_cut = regularized_cut(driven_cuts)
                     if self.closed:
                         driven_cut = driven_cut.difference(driven_exclusion)
                     driven_cut = driven_cut.intersection(driven_trim_zone)
@@ -3325,6 +3366,11 @@ class _GearGenerator:
             driven,
             drive_result.protected_flanks,
             driven_result.protected_flanks,
+            samples_per_radian=samples_per_radian,
+            has_hybrid_undercut=(hybrid_undercut_count > 0),
+        )
+        rolling_base_phase_count = rolling_trim_phase_count // (
+            rolling_trim_pass_count * len(ROLLING_STAGGER_OFFSETS)
         )
         posttrim_drive_flank_error, posttrim_drive_regular_factor = (
             self._verify_protected_flanks(
@@ -3493,6 +3539,19 @@ class _GearGenerator:
                 "all_unprotected_tooth_material" if self.closed else "pitch_side_roots"
             ),
             "rolling_nonworking_trim_phase_count": rolling_trim_phase_count,
+            "rolling_nonworking_base_phase_count": rolling_base_phase_count,
+            "rolling_nonworking_effective_phase_count_per_pass": (
+                rolling_base_phase_count * len(ROLLING_STAGGER_OFFSETS)
+            ),
+            "rolling_nonworking_maximum_angular_step": (
+                abs(self.active_end - self.active_start) / rolling_base_phase_count
+            ),
+            "rolling_nonworking_cut_regularization": (
+                "conservative_morphological_closing"
+            ),
+            "rolling_nonworking_cut_closing_distance": (
+                ROLLING_CUT_CLOSING_FACTOR * self.config.module
+            ),
             "rolling_nonworking_trim_pass_count": rolling_trim_pass_count,
             "rolling_nonworking_initial_overlap_area": rolling_initial_overlap,
             "rolling_nonworking_sampled_overlap_area": rolling_sampled_overlap,

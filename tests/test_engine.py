@@ -14,6 +14,7 @@ from ncgears._policy import (
     ANALYTIC_CHORD_TOLERANCE_FACTOR,
     ANALYTIC_ENVELOPE_RESIDUAL_FACTOR,
     ANALYTIC_TANGENCY_RESIDUAL_TOLERANCE,
+    HYBRID_ROLLING_PHASES_PER_TOOTH,
     INTERSECTION_RESIDUAL_FACTOR,
     MAX_SUPPORT_RADIUS_PITCH_FACTOR,
     MIN_FLANK_CURVE_SAMPLES,
@@ -25,6 +26,13 @@ from ncgears._policy import (
     VERIFICATION_MIN_OPEN_PHASES,
 )
 from ncgears.engine import EngineConfig, _GearGenerator
+
+
+def _severe_boundary_reversal_count(outline: np.ndarray) -> int:
+    points = outline[:-1]
+    incoming = points - np.roll(points, 1, axis=0)
+    outgoing = np.roll(points, -1, axis=0) - points
+    return int(np.count_nonzero(np.einsum("ij,ij->i", incoming, outgoing) < 0.0))
 
 
 def _assert_verified_pair(pair: ncgears.GearPair) -> None:
@@ -462,3 +470,13 @@ def test_nonconvex_cusps_become_hybrid_opposing_gear_undercuts(
     assert pair.metadata["rolling_nonworking_trim_pass_count"] >= 2
     assert pair.metadata["rolling_nonworking_removed_area"] > 0.0
     assert pair.metadata["minimum_protected_contact_pairs"] >= 1
+    assert pair.metadata["rolling_nonworking_base_phase_count"] >= (
+        HYBRID_ROLLING_PHASES_PER_TOOTH * max(pair.drive_teeth, pair.driven_teeth)
+    )
+    assert pair.metadata["rolling_nonworking_cut_regularization"] == (
+        "conservative_morphological_closing"
+    )
+    # The previous four-pose/tooth cutter left hundreds of direction-reversing
+    # overlay vertices on this fixture (236 drive, 518 driven on GEOS 3.13).
+    assert _severe_boundary_reversal_count(pair.drive_outline) < 200
+    assert _severe_boundary_reversal_count(pair.driven_outline) < 200
