@@ -19,7 +19,15 @@ from numpy.typing import NDArray
 from scipy.integrate import cumulative_simpson, simpson
 from scipy.optimize import brentq, least_squares, minimize_scalar
 from scipy.spatial import cKDTree
-from shapely import Geometry, affinity, make_valid, union_all
+from shapely import (
+    Geometry,
+    affinity,
+    line_merge,
+    make_valid,
+    node,
+    set_precision,
+    union_all,
+)
 from shapely.geometry import LineString, MultiPolygon, Point, Polygon
 from shapely.ops import nearest_points
 
@@ -84,6 +92,7 @@ from ._policy import (
     OPEN_ANALYTIC_BACKING_RADIUS_PITCH_FACTOR,
     OUTLINE_BACKTRACK_TOLERANCE_MULTIPLIER,
     OUTLINE_COLLINEAR_TOLERANCE_FRACTION,
+    OUTLINE_CONNECTIVITY_TOLERANCE_FACTOR,
     OUTLINE_DUPLICATE_TOLERANCE_FRACTION,
     OVERLAP_AREA_TOLERANCE_FACTOR,
     OVERLAP_CONTACT_PAIR_ALLOWANCE,
@@ -536,6 +545,32 @@ def _outline(polygon: Polygon, tolerance: float) -> FloatArray:
     if _signed_area(points) < 0.0:
         points = points[::-1].copy()
     return points
+
+
+def _verify_single_connected_outline(
+    points: FloatArray,
+    *,
+    label: str,
+    tolerance: float,
+) -> None:
+    """Require a boundary to remain one closed loop at working precision.
+
+    A GEOS-valid polygon can contain a near-zero-width hairpin whose exterior
+    is simple only at full floating-point precision.  Precision normalization
+    collapses those near-coincident edges; noding and merging then reveal the
+    multiple segment chains hidden by the sliver.
+    """
+
+    normalized = set_precision(LineString(points), tolerance)
+    merged = line_merge(node(normalized))
+    if isinstance(merged, LineString) and merged.is_ring:
+        return
+
+    chain_count = len(getattr(merged, "geoms", (merged,)))
+    raise RuntimeError(
+        f"{label.capitalize()} gear outline is not one connected closed loop "
+        f"at tolerance {tolerance:.9g} ({chain_count} segment chains)"
+    )
 
 
 def _transform_outline(
@@ -3369,6 +3404,20 @@ class _GearGenerator:
             samples_per_radian=samples_per_radian,
             has_hybrid_undercut=(hybrid_undercut_count > 0),
         )
+        outline_connectivity_tolerance = _length_tolerance(
+            self.config.module,
+            OUTLINE_CONNECTIVITY_TOLERANCE_FACTOR,
+        )
+        _verify_single_connected_outline(
+            drive,
+            label="drive",
+            tolerance=outline_connectivity_tolerance,
+        )
+        _verify_single_connected_outline(
+            driven,
+            label="driven",
+            tolerance=outline_connectivity_tolerance,
+        )
         rolling_base_phase_count = rolling_trim_phase_count // (
             rolling_trim_pass_count * len(ROLLING_STAGGER_OFFSETS)
         )
@@ -3504,6 +3553,12 @@ class _GearGenerator:
             "overlap_area_tolerance": self._overlap_area_tolerance(),
             "verification_method": "staggered_sampled_phase_grid",
             "verification_stagger_grid_count": len(ROLLING_STAGGER_OFFSETS),
+            "outline_connectivity_verification": (
+                "precision_noded_single_closed_loop"
+            ),
+            "outline_connectivity_tolerance": outline_connectivity_tolerance,
+            "drive_outline_is_single_closed_loop": True,
+            "driven_outline_is_single_closed_loop": True,
             "drive_teeth": self.drive_teeth,
             "driven_teeth": self.driven_teeth,
             "average_angular_ratio": self.average_ratio,

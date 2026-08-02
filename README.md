@@ -167,7 +167,7 @@ curves and arranges complete tooth bodies. Open bodies use an ordered,
 parameter-clipped analytical boundary rather than a radial sector
 intersection. A successful result includes checks for:
 
-- simple, hub-connected gear bodies
+- one precision-stable connected closed outline per gear, with hub-connected bodies
 - sampled whole-cycle solid interference
 - contact motion recovered from the finished outlines
 - analytic envelope/tangency, intersection, join, and chord residuals
@@ -180,8 +180,9 @@ intersection. A successful result includes checks for:
 `metadata.json` reports
 `generation_backend: "hybrid_analytic_involute"`, flank sample count, maximum
 envelope residual, maximum envelope-tangency residual, chord error, protected
-flank diagnostics, and iterative rolling-cut diagnostics. Pair verification
-uses a bounded thread pool of at most eight workers.
+flank diagnostics, outline-connectivity status, and iterative rolling-cut
+diagnostics. Pair verification uses a bounded thread pool of at most eight
+workers.
 
 These geometry checks are not load-rating or manufacturing certification.
 

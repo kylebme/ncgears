@@ -25,7 +25,11 @@ from ncgears._policy import (
     VERIFICATION_MIN_CLOSED_PHASES,
     VERIFICATION_MIN_OPEN_PHASES,
 )
-from ncgears.engine import EngineConfig, _GearGenerator
+from ncgears.engine import (
+    EngineConfig,
+    _GearGenerator,
+    _verify_single_connected_outline,
+)
 
 
 def _severe_boundary_reversal_count(outline: np.ndarray) -> int:
@@ -107,6 +111,12 @@ def _assert_verified_pair(pair: ncgears.GearPair) -> None:
     assert pair.metadata["verification_stagger_grid_count"] == len(
         ROLLING_STAGGER_OFFSETS
     )
+    assert pair.metadata["outline_connectivity_verification"] == (
+        "precision_noded_single_closed_loop"
+    )
+    assert pair.metadata["outline_connectivity_tolerance"] > 0.0
+    assert pair.metadata["drive_outline_is_single_closed_loop"] is True
+    assert pair.metadata["driven_outline_is_single_closed_loop"] is True
     base_phase_count = (
         VERIFICATION_MIN_CLOSED_PHASES
         if pair.metadata["topology"] == "closed"
@@ -125,6 +135,54 @@ def _assert_verified_pair(pair: ncgears.GearPair) -> None:
         polygon = Polygon(outline)
         assert polygon.is_valid
         assert polygon.area > 1.0
+
+
+def test_outline_connectivity_verification_rejects_precision_hairpin() -> None:
+    square = np.array(
+        [[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0], [0.0, 0.0]]
+    )
+    _verify_single_connected_outline(square, label="drive", tolerance=1e-8)
+
+    epsilon = 1e-10
+    hairpin = np.array(
+        [
+            [0.0, 0.0],
+            [4.0, 0.0],
+            [4.0, 4.0],
+            [2.0 + epsilon, 4.0],
+            [2.0 + epsilon, epsilon],
+            [2.0 - epsilon, epsilon],
+            [2.0 - epsilon, 4.0],
+            [0.0, 4.0],
+            [0.0, 0.0],
+        ]
+    )
+    assert LineString(hairpin).is_ring
+    assert Polygon(hairpin).is_valid
+
+    with pytest.raises(
+        RuntimeError,
+        match="Drive gear outline is not one connected closed loop",
+    ):
+        _verify_single_connected_outline(hairpin, label="drive", tolerance=1e-8)
+
+
+def test_mixed_harmonic_centrode_rejects_disconnected_outlines(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        ncgears.GenerationError,
+        match="gear outline is not one connected closed loop",
+    ):
+        ncgears.generate_from_centrode(
+            "1 + 0.10*cos(phi) + 0.08*sin(2*phi) "
+            "- 0.055*cos(3*phi) + 0.035*sin(5*phi)",
+            name="mixed_harmonic_disconnected_outline",
+            teeth=24,
+            samples=1024,
+            samples_per_radian=110,
+            output_directory=tmp_path,
+        )
 
 
 def test_hybrid_analytic_involute_is_the_only_geometry_engine() -> None:
@@ -427,7 +485,9 @@ def test_deep_nonconvex_centrode_uses_analytic_involute_form(
         name="deep_nonconvex",
         teeth=100,
         target_cycle_delta=5.0 * math.pi,
-        samples=1024,
+        # This high-curvature input needs enough source samples to avoid an
+        # unstable near-zero-width branch on the driven outline.
+        samples=4096,
         samples_per_radian=20,
         output_directory=tmp_path,
     )
