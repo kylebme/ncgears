@@ -45,6 +45,7 @@ from ._policy import (
     CENTRODE_FIDELITY_ALLOWANCE_MODULES,
     CENTRODE_OUTLINE_SAMPLES_PER_TOOTH,
     CLEARANCE_BUFFER_QUADRANT_SEGMENTS,
+    CLEARANCE_CHORD_TOLERANCE_FACTOR,
     CONTACT_AREA_TOLERANCE_FACTOR,
     CONTACT_RECOVERY_PHASE_OFFSET,
     CONTACT_RECOVERY_PHASES_CLOSED,
@@ -642,7 +643,7 @@ def _offset_outline_normal(
             f"Global clearance introduced a boundary artifact in the {label} gear"
         )
     minimum_offset = float(original.boundary.distance(delivered.boundary))
-    chord_tolerance = _length_tolerance(module, ANALYTIC_CHORD_TOLERANCE_FACTOR)
+    chord_tolerance = _length_tolerance(module, CLEARANCE_CHORD_TOLERANCE_FACTOR)
     if minimum_offset + chord_tolerance < distance:
         raise RuntimeError(
             f"Global clearance face offset on the {label} gear fell below the "
@@ -928,8 +929,7 @@ class _GearGenerator:
         if not math.isfinite(config.clearance) or config.clearance < 0.0:
             raise ValueError("Clearance must be finite and nonnegative")
         if config.max_backlash_deg is not None and (
-            not math.isfinite(config.max_backlash_deg)
-            or config.max_backlash_deg < 0.0
+            not math.isfinite(config.max_backlash_deg) or config.max_backlash_deg < 0.0
         ):
             raise ValueError("Maximum backlash must be finite and nonnegative")
         if config.clearance != 0.0 and config.max_backlash_deg is not None:
@@ -1106,9 +1106,7 @@ class _GearGenerator:
                 * self.minimum_driven_pitch_radius
                 * pressure_factor
             )
-        self.clearance_module_fraction = (
-            self.clearance_distance / self.config.module
-        )
+        self.clearance_module_fraction = self.clearance_distance / self.config.module
         self.minimum_backlash_deg = math.degrees(
             4.0
             * self.clearance_distance
@@ -2526,9 +2524,7 @@ class _GearGenerator:
             root_trim_bodies.append(
                 make_valid(
                     Polygon(
-                        np.column_stack(
-                            (root_coordinates.real, root_coordinates.imag)
-                        )
+                        np.column_stack((root_coordinates.real, root_coordinates.imag))
                     )
                 )
             )
@@ -2746,12 +2742,14 @@ class _GearGenerator:
             self.config.module,
             PROTECTED_FLANK_GUARD_CHORD_FACTORS * ANALYTIC_CHORD_TOLERANCE_FACTOR,
         )
-        return LineString(
-            np.column_stack((points.real, points.imag))
-        ).buffer(
-            guard_width,
-            quad_segs=TRIM_BUFFER_QUADRANT_SEGMENTS,
-        ).intersection(target)
+        return (
+            LineString(np.column_stack((points.real, points.imag)))
+            .buffer(
+                guard_width,
+                quad_segs=TRIM_BUFFER_QUADRANT_SEGMENTS,
+            )
+            .intersection(target)
+        )
 
     def _rolling_core_guard(self) -> Geometry:
         """Protect the connected support core from mutual cutter erosion."""
@@ -3202,9 +3200,9 @@ class _GearGenerator:
                         center_x,
                         center_y,
                     )
-                    drive_overlap = overlap.intersection(
-                        drive_trim_zone
-                    ).difference(drive_exclusion)
+                    drive_overlap = overlap.intersection(drive_trim_zone).difference(
+                        drive_exclusion
+                    )
                     driven_overlap = overlap.intersection(
                         placed_driven_trim_zone
                     ).difference(placed_driven_exclusion)
@@ -3854,9 +3852,7 @@ class _GearGenerator:
             "overlap_area_tolerance": self._overlap_area_tolerance(),
             "verification_method": "staggered_sampled_phase_grid",
             "verification_stagger_grid_count": len(ROLLING_STAGGER_OFFSETS),
-            "outline_connectivity_verification": (
-                "precision_noded_single_closed_loop"
-            ),
+            "outline_connectivity_verification": ("precision_noded_single_closed_loop"),
             "outline_connectivity_tolerance": outline_connectivity_tolerance,
             "drive_outline_is_single_closed_loop": True,
             "driven_outline_is_single_closed_loop": True,
@@ -3941,9 +3937,7 @@ class _GearGenerator:
             "rolling_nonworking_initial_overlap_area": rolling_initial_overlap,
             "rolling_nonworking_sampled_overlap_area": rolling_sampled_overlap,
             "rolling_nonworking_removed_area": rolling_removed_area,
-            "preclearance_placed_pair_overlap_area": (
-                preclearance_maximum_overlap
-            ),
+            "preclearance_placed_pair_overlap_area": (preclearance_maximum_overlap),
             "placed_pair_overlap_area": maximum_overlap,
             "centrodes_are_convex": self.centrodes_are_convex,
             "maximum_drive_curvature": self.maximum_drive_curvature,
@@ -3976,9 +3970,7 @@ class _GearGenerator:
             "maximum_sliding_velocity_factor": (1.0 + maximum_ratio)
             * contact_distance_bound,
             "minimum_root_radius": minimum_root_radius,
-            "preclearance_minimum_root_radius": (
-                preclearance_minimum_root_radius
-            ),
+            "preclearance_minimum_root_radius": (preclearance_minimum_root_radius),
             "preclearance_minimum_tip_thickness": (
                 self.preclearance_minimum_tip_thickness
             ),

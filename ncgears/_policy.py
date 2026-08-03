@@ -90,6 +90,7 @@ ANALYTIC_TANGENCY_RESIDUAL_TOLERANCE = 1e-10
 ANALYTIC_REGULAR_DERIVATIVE_TOLERANCE = 1e-10
 CENTRODE_CONVEXITY_CURVATURE_FACTOR = 1e-9
 ANGLE_CLOSURE_TOLERANCE = 1e-8
+CLEARANCE_CHORD_TOLERANCE_FACTOR = 1e-4
 
 # Analytic curve intersection and cusp discovery. Search windows are measured
 # in circular pitch; sample counts are derived from span instead of being tied
