@@ -166,8 +166,10 @@ CASES = [
         teeth=36,
         category="adversarial_harmonic",
         reference_center_distance=1.0,
-        note="Expected quality-limit case: recovered motion error exceeds 0.01 rad.",
-        expected_to_pass=False,
+        note=(
+            "Three-lobe shoulder regression exercising hybrid root-only "
+            "rolling cuts without modifying the addendum."
+        ),
     ),
     StressCase(
         name="stress_limit_five_lobe_deep",

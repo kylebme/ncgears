@@ -215,6 +215,7 @@ class _ProtectedFlankSpan:
 @dataclass(frozen=True)
 class _AnalyticGearResult:
     outline: FloatArray
+    root_trim_zone: Geometry
     sample_count: int
     flank_sample_count: int
     maximum_envelope_residual: float
@@ -481,6 +482,16 @@ def _clean_polygon(geometry: Geometry) -> Polygon:
     if not parts:
         raise RuntimeError("Geometry operation produced no polygonal body")
     return max(parts, key=lambda polygon: polygon.area)
+
+
+def _clean_polygon_at_precision(geometry: Geometry, precision: float) -> Polygon:
+    """Collapse sub-precision polygon features without retaining a GEOS grid."""
+
+    snapped = set_precision(geometry, precision)
+    # Affine placement of a fixed-precision geometry can retain an unusable
+    # precision model in GEOS. Keep the snapped coordinates while restoring
+    # the double-precision model used by the rest of the engine.
+    return _clean_polygon(set_precision(snapped, 0.0))
 
 
 def _outline(polygon: Polygon, tolerance: float) -> FloatArray:
@@ -2223,6 +2234,9 @@ class _GearGenerator:
                         GEOMETRY_LENGTH_TOLERANCE_FACTOR,
                     ),
                 ),
+                root_trim_zone=_clean_polygon(
+                    self._analytic_pitch_material(driven).intersection(polygon)
+                ),
                 sample_count=total_samples,
                 flank_sample_count=flank_sample_count,
                 maximum_envelope_residual=maximum_envelope_residual,
@@ -2242,6 +2256,7 @@ class _GearGenerator:
         total_samples += count
         maximum_chord_error = max(maximum_chord_error, chord)
         tooth_bodies: list[Geometry] = [root_blank]
+        root_trim_bodies: list[Geometry] = []
 
         def append_piece(
             ring: list[complex],
@@ -2350,6 +2365,41 @@ class _GearGenerator:
             append_piece(ring, dedendum)
             total_samples += count
             maximum_chord_error = max(maximum_chord_error, chord)
+
+            # The rolling cutter may reshape only the closure between the two
+            # working-flank transitions. Closing that root boundary directly
+            # includes hybrid cusp stock even when it lies outside the pitch
+            # curve, without admitting any working flank or addendum material.
+            root_ring: list[complex] = []
+            if driven:
+                root_first_key = (tooth_phase, 1)
+                root_second_key = (next_phase, -1)
+            else:
+                root_first_key = (tooth_phase, -1)
+                root_second_key = (tooth_phase, 1)
+            append_piece(root_ring, fillets[root_first_key])
+            root_ring.append(flanks[root_first_key][0])
+            root_ring.append(flanks[root_second_key][0])
+            append_piece(
+                root_ring,
+                fillets[root_second_key][::-1],
+                hybrid_connector=geometries[root_second_key].hybrid_undercut,
+            )
+            append_piece(root_ring, dedendum)
+            root_seam = 0.5 * (root_ring[-1] + root_ring[0])
+            root_ring[-1] = root_seam
+            root_ring[0] = root_seam
+            root_coordinates = np.asarray(root_ring, dtype=np.complex128)
+            root_trim_bodies.append(
+                make_valid(
+                    Polygon(
+                        np.column_stack(
+                            (root_coordinates.real, root_coordinates.imag)
+                        )
+                    )
+                )
+            )
+
             seam_gap = abs(ring[-1] - ring[0])
             maximum_join_gap = max(maximum_join_gap, seam_gap)
             seam = 0.5 * (ring[-1] + ring[0])
@@ -2364,12 +2414,33 @@ class _GearGenerator:
 
         arranged: Geometry = union_all(tooth_bodies)
         polygon = _clean_polygon(arranged)
+        root_zone_precision = _length_tolerance(
+            self.config.module,
+            OUTLINE_CONNECTIVITY_TOLERANCE_FACTOR,
+        )
+        root_zone_union = union_all(
+            [
+                self._analytic_pitch_material(driven),
+                *root_trim_bodies,
+            ],
+            grid_size=root_zone_precision,
+        )
+        root_trim_zone = _clean_polygon(
+            set_precision(
+                root_zone_union.intersection(
+                    polygon,
+                    grid_size=root_zone_precision,
+                ),
+                0.0,
+            )
+        )
         outline = _outline(
             polygon,
             _length_tolerance(self.config.module, GEOMETRY_LENGTH_TOLERANCE_FACTOR),
         )
         return _AnalyticGearResult(
             outline=outline,
+            root_trim_zone=root_trim_zone,
             sample_count=total_samples,
             flank_sample_count=flank_sample_count,
             maximum_envelope_residual=maximum_envelope_residual,
@@ -2515,6 +2586,39 @@ class _GearGenerator:
         if not guards:
             return Point(0.0, 0.0).buffer(0.0)
         return union_all(guards).intersection(target)
+
+    def _protected_addendum_guard(
+        self,
+        driven: bool,
+        target: Geometry,
+    ) -> Geometry:
+        """Return a material strip that prevents rolling cuts at tooth tips."""
+
+        teeth = self.driven_teeth if driven else self.drive_teeth
+        sample_count = max(
+            MIN_ROOT_CURVE_SAMPLES,
+            ROOT_CURVE_SAMPLES_PER_TOOTH * teeth,
+        )
+        common_arc = np.linspace(
+            0.0,
+            teeth * math.pi * self.config.module,
+            sample_count + 1,
+        )
+        points = self._analytic_offset_points(
+            driven=driven,
+            common_arc=common_arc,
+            height=self.addendum,
+        )
+        guard_width = _length_tolerance(
+            self.config.module,
+            PROTECTED_FLANK_GUARD_CHORD_FACTORS * ANALYTIC_CHORD_TOLERANCE_FACTOR,
+        )
+        return LineString(
+            np.column_stack((points.real, points.imag))
+        ).buffer(
+            guard_width,
+            quad_segs=TRIM_BUFFER_QUADRANT_SEGMENTS,
+        ).intersection(target)
 
     def _rolling_core_guard(self) -> Geometry:
         """Protect the connected support core from mutual cutter erosion."""
@@ -2820,36 +2924,36 @@ class _GearGenerator:
         self,
         drive: FloatArray,
         driven: FloatArray,
+        drive_trim_zone: Geometry,
+        driven_trim_zone: Geometry,
         drive_flanks: tuple[_ProtectedFlankSpan, ...],
         driven_flanks: tuple[_ProtectedFlankSpan, ...],
         *,
         samples_per_radian: int,
         has_hybrid_undercut: bool,
     ) -> tuple[FloatArray, FloatArray, int, float, float, float, int]:
-        """Trim non-working interference by rolling the finished pair.
+        """Trim root interference by rolling the finished pair.
 
-        On closed gears, retained analytic flanks and the connected support
-        cores are protected. Any other overlapping material is eligible for
-        removal, including a nonconvex cusp loop outside the pitch curve. Both
-        gears are updated from the same grid snapshot and the staggered grids
-        repeat to a sampled fixed point. Open profiles retain the historical
-        pitch-side-only, single-pass trim because their endpoint closures are
-        not periodic cutter stock.
+        Retained analytic flanks, addendum geometry, and connected support
+        cores are protected. Both gears are updated from the same grid snapshot
+        and closed-gear grids repeat to a sampled fixed point. Open profiles
+        retain a single pass because their endpoint closures are not periodic
+        cutter stock.
         """
 
         drive_geometry: Geometry = Polygon(drive[:-1])
         driven_geometry: Geometry = Polygon(driven[:-1])
         drive_flank_guard = self._protected_flank_guard(drive_flanks, drive_geometry)
         driven_flank_guard = self._protected_flank_guard(driven_flanks, driven_geometry)
+        drive_addendum_guard = self._protected_addendum_guard(False, drive_geometry)
+        driven_addendum_guard = self._protected_addendum_guard(True, driven_geometry)
         drive_core_guard = self._rolling_core_guard().intersection(drive_geometry)
         driven_core_guard = self._rolling_core_guard().intersection(driven_geometry)
-        drive_exclusion = union_all([drive_flank_guard, drive_core_guard])
-        driven_exclusion = union_all([driven_flank_guard, driven_core_guard])
-        drive_trim_zone = (
-            drive_geometry if self.closed else self._analytic_pitch_material(False)
+        drive_exclusion = union_all(
+            [drive_flank_guard, drive_addendum_guard, drive_core_guard]
         )
-        driven_trim_zone = (
-            driven_geometry if self.closed else self._analytic_pitch_material(True)
+        driven_exclusion = union_all(
+            [driven_flank_guard, driven_addendum_guard, driven_core_guard]
         )
         phase_count = max(
             ROLLING_MIN_PHASES,
@@ -2870,11 +2974,14 @@ class _GearGenerator:
             ),
         )
         overlap_tolerance = self._overlap_area_tolerance()
-        classification_tolerance = overlap_tolerance
         trim_clearance = _length_tolerance(
             self.config.module, ANALYTIC_CHORD_TOLERANCE_FACTOR
         )
         convergence_tolerance = ROLLING_CONVERGENCE_AREA_FACTOR * self.config.module**2
+        overlay_precision = _length_tolerance(
+            self.config.module,
+            OUTLINE_CONNECTIVITY_TOLERANCE_FACTOR,
+        )
         psi_start = float(self._psi(self.active_start))
         initial_overlap = 0.0
         remaining_overlap = 0.0
@@ -2884,7 +2991,10 @@ class _GearGenerator:
         cut_closing = _length_tolerance(self.config.module, ROLLING_CUT_CLOSING_FACTOR)
 
         def regularized_cut(cuts: list[Geometry]) -> Geometry:
-            raw_cut = union_all(cuts)
+            raw_cut = set_precision(
+                union_all(cuts, grid_size=overlay_precision),
+                0.0,
+            )
             closed_cut = make_valid(
                 raw_cut.buffer(
                     cut_closing,
@@ -2898,6 +3008,12 @@ class _GearGenerator:
                 trim_clearance,
                 quad_segs=TRIM_BUFFER_QUADRANT_SEGMENTS,
             )
+
+        def polygonal_cut(geometry: Geometry) -> Geometry | None:
+            parts = _polygon_parts(make_valid(geometry))
+            if not parts:
+                return None
+            return parts[0] if len(parts) == 1 else MultiPolygon(parts)
 
         maximum_passes = ROLLING_MAX_PASSES if self.closed else 1
         for pass_index in range(maximum_passes):
@@ -2922,7 +3038,7 @@ class _GearGenerator:
                     fraction: float,
                     current_drive: Geometry = drive_geometry,
                     current_driven: Geometry = driven_geometry,
-                ) -> tuple[float, Geometry | None, Geometry | None, float]:
+                ) -> tuple[float, Geometry | None, Geometry | None]:
                     phi = self.active_start + (
                         self.active_end - self.active_start
                     ) * float(fraction)
@@ -2940,45 +3056,28 @@ class _GearGenerator:
                     overlap = current_drive.intersection(placed_driven)
                     area = float(overlap.area)
                     if area <= overlap_tolerance:
-                        return area, None, None, 0.0
+                        return area, None, None
                     placed_driven_exclusion = self._place_geometry(
                         driven_exclusion,
                         relative_angle,
                         center_x,
                         center_y,
                     )
-                    if self.closed:
-                        protected_on_both = overlap.intersection(
-                            drive_exclusion
-                        ).intersection(placed_driven_exclusion)
-                        unremovable = protected_on_both
-                        drive_overlap = overlap.difference(drive_exclusion)
-                        driven_overlap = overlap.difference(placed_driven_exclusion)
-                    else:
-                        placed_driven_trim_zone = self._place_geometry(
-                            driven_trim_zone,
-                            relative_angle,
-                            center_x,
-                            center_y,
-                        )
-                        drive_root_overlap = overlap.intersection(drive_trim_zone)
-                        driven_root_overlap = overlap.intersection(
-                            placed_driven_trim_zone
-                        )
-                        outside_root_zones = overlap.difference(
-                            union_all([drive_root_overlap, driven_root_overlap])
-                        )
-                        unremovable = outside_root_zones
-                        drive_overlap = drive_root_overlap
-                        driven_overlap = driven_root_overlap
-                    unremovable_area = float(unremovable.area)
-                    local_drive_cut = (
-                        make_valid(drive_overlap)
-                        if not drive_overlap.is_empty
-                        else None
+                    placed_driven_trim_zone = self._place_geometry(
+                        driven_trim_zone,
+                        relative_angle,
+                        center_x,
+                        center_y,
                     )
+                    drive_overlap = overlap.intersection(
+                        drive_trim_zone
+                    ).difference(drive_exclusion)
+                    driven_overlap = overlap.intersection(
+                        placed_driven_trim_zone
+                    ).difference(placed_driven_exclusion)
+                    local_drive_cut = polygonal_cut(drive_overlap)
                     local_driven_cut = (
-                        make_valid(
+                        polygonal_cut(
                             self._unplace_geometry(
                                 make_valid(driven_overlap),
                                 relative_angle,
@@ -2993,7 +3092,6 @@ class _GearGenerator:
                         area,
                         local_drive_cut,
                         local_driven_cut,
-                        unremovable_area,
                     )
 
                 with ThreadPoolExecutor(
@@ -3007,16 +3105,8 @@ class _GearGenerator:
                         area,
                         drive_overlap,
                         driven_overlap,
-                        unremovable_area,
                     ) in phase_results:
                         grid_maximum = max(grid_maximum, area)
-                        if unremovable_area > classification_tolerance:
-                            raise RuntimeError(
-                                "Opposing-gear cutter interference cannot be "
-                                "removed without entering protected working "
-                                "flanks or support cores "
-                                f"(area {unremovable_area:.9g})"
-                            )
                         if drive_overlap is not None:
                             drive_cuts.append(drive_overlap)
                         if driven_overlap is not None:
@@ -3060,12 +3150,23 @@ class _GearGenerator:
                 f"{maximum_passes} passes"
             )
 
+        # Repeated full-precision overlay can leave two boundaries that are
+        # mathematically coincident separated by a few ULPs. Collapse those
+        # nonphysical root slivers before extracting the finished outlines.
+        drive_geometry = _clean_polygon_at_precision(
+            drive_geometry,
+            overlay_precision,
+        )
+        driven_geometry = _clean_polygon_at_precision(
+            driven_geometry,
+            overlay_precision,
+        )
         drive_outline = _outline(
-            _clean_polygon(drive_geometry),
+            drive_geometry,
             _length_tolerance(self.config.module, GEOMETRY_LENGTH_TOLERANCE_FACTOR),
         )
         driven_outline = _outline(
-            _clean_polygon(driven_geometry),
+            driven_geometry,
             _length_tolerance(self.config.module, GEOMETRY_LENGTH_TOLERANCE_FACTOR),
         )
         return (
@@ -3144,8 +3245,10 @@ class _GearGenerator:
         overlap_tolerance = self._overlap_area_tolerance()
         if maximum_overlap > overlap_tolerance:
             raise RuntimeError(
-                "Staggered sampled-phase verification found solid overlap area "
-                f"{maximum_overlap:.9g} above tolerance {overlap_tolerance:.9g}"
+                "Root-only rolling trim left protected-flank or addendum "
+                f"overlap area {maximum_overlap:.9g} above tolerance "
+                f"{overlap_tolerance:.9g}; resolving it would require "
+                "modifying finished tooth geometry"
             )
 
         contact_area_tolerance = CONTACT_AREA_TOLERANCE_FACTOR * self.config.module**2
@@ -3399,6 +3502,8 @@ class _GearGenerator:
         ) = self._trim_rolling_nonworking_interference(
             drive,
             driven,
+            drive_result.root_trim_zone,
+            driven_result.root_trim_zone,
             drive_result.protected_flanks,
             driven_result.protected_flanks,
             samples_per_radian=samples_per_radian,
@@ -3590,8 +3695,12 @@ class _GearGenerator:
             "protected_contact_coverage_fraction": (
                 protected_contact_coverage_fraction
             ),
-            "rolling_nonworking_trim_scope": (
-                "all_unprotected_tooth_material" if self.closed else "pitch_side_roots"
+            "rolling_nonworking_trim_scope": "analytic_root_regions",
+            "rolling_nonworking_root_zone": (
+                "pitch_material_plus_analytic_root_closures"
+            ),
+            "rolling_nonworking_protected_geometry": (
+                "working_flanks_addendum_and_support_core"
             ),
             "rolling_nonworking_trim_phase_count": rolling_trim_phase_count,
             "rolling_nonworking_base_phase_count": rolling_base_phase_count,
@@ -3607,6 +3716,7 @@ class _GearGenerator:
             "rolling_nonworking_cut_closing_distance": (
                 ROLLING_CUT_CLOSING_FACTOR * self.config.module
             ),
+            "rolling_nonworking_overlay_precision": outline_connectivity_tolerance,
             "rolling_nonworking_trim_pass_count": rolling_trim_pass_count,
             "rolling_nonworking_initial_overlap_area": rolling_initial_overlap,
             "rolling_nonworking_sampled_overlap_area": rolling_sampled_overlap,

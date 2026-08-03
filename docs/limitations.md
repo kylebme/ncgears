@@ -58,12 +58,12 @@ remnants remain unsuitable inputs.
 
 Root undercuts and other non-working interference are resolved by running the
 finished analytical pair through the requested motion, using each opposing gear
-as a cutter. On closed gears, cusp-free analytic spans that remain exposed on
-the arranged body are protected by one-sided material guards. Overlap may be
-removed from either gear outside those guards, including above the pitch curve
-for a nonconvex cusp loop. If an overlap is protected on both gears, the design
-is rejected. Open profiles retain the more conservative pitch-side root trim
-because their artificial endpoint closure faces are not periodic cutter stock.
+as a root cutter. Cusp-free analytic spans that remain exposed on the arranged
+body, the addendum boundary, and the connected support core are protected by
+material guards. Eligible material is limited to an analytic root region:
+pitch-side material plus fillet/dedendum closures that capture nonconvex cusp
+stock outside the pitch curve. An overlap that cannot be removed inside that
+region is rejected rather than resolved by reshaping a finished flank or tip.
 
 The analytic rounded rack-tip fillet remains the preferred closure. When it
 cannot join a cusp-free flank component, a sacrificial connection closes the
@@ -77,7 +77,7 @@ tooth on each grid, the same per-grid floor as the v0.2.1 Boolean generator;
 `samples_per_radian` can raise that floor further. The accumulated cuts are
 morphologically closed over 0.00175 module, then unioned with the original
 exact cuts before subtraction. This fills narrow pose-to-pose scallops without
-adding global backlash or weakening the conservative interference removal.
+adding global backlash or extending removal outside the analytic root region.
 Short GEOS overlay edges that reverse direction are also removed below the
 analytic chord-error budget. An open profile receives one four-grid sweep.
 

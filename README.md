@@ -128,13 +128,14 @@ straight-rack flank and rounded rack-tip envelope equations without constructing
 or sweeping a complete rack solid, so remote rack material cannot erase a
 pitch-curve concavity. Exact addendum and dedendum offsets complete each tooth.
 An independent rolling pass uses each opposing gear as a cutter to remove
-measured non-working interference. On closed gears, exact regular flank spans
-and the connected support cores are guarded; other material, including
-nonconvex cusp loops outside the pitch curve, may be removed. Finite open
-profiles retain pitch-side-only trimming and clip each analytical curve in rolling-arc
-parameter space, then follow one quarter of the centrode back across the inner
-boundary. Source-domain padding is used only to solve endpoint teeth; it cannot
-change or clip the finished body.
+measured root interference. Exact regular flank spans, addendum geometry, and
+the connected support cores are guarded. The eligible root region combines
+pitch-side material with analytic fillet/dedendum closures, so nonconvex cusp
+stock outside the pitch curve can be removed without reshaping a tooth tip.
+Finite open profiles clip each analytical curve in rolling-arc parameter space,
+then follow one quarter of the centrode back across the inner boundary.
+Source-domain padding is used only to solve endpoint teeth; it cannot change or
+clip the finished body.
 
 ## Closed and open designs
 
@@ -172,7 +173,7 @@ intersection. A successful result includes checks for:
 - contact motion recovered from the finished outlines
 - analytic envelope/tangency, intersection, join, and chord residuals
 - cusp-free, exposed protected flanks with sampled conjugate contact coverage
-- iterative opposing-gear undercut generation without protected-flank cuts
+- iterative opposing-gear undercut generation confined to analytic root regions
 - root radius, tip thickness, and centrode curvature
 - drive-outline fidelity to the requested centrode
 - sliding-velocity and undercut diagnostics

@@ -69,10 +69,9 @@ CENTRODE_OUTLINE_SAMPLES_PER_TOOTH = 128
 GEOMETRY_LENGTH_TOLERANCE_FACTOR = 2e-7
 OUTLINE_DUPLICATE_TOLERANCE_FRACTION = 0.05
 OUTLINE_COLLINEAR_TOLERANCE_FRACTION = 0.02
-# Normalize a completed boundary at a finer precision than Boolean cleanup
-# before checking that it still forms exactly one closed loop.  This exposes
-# near-coincident slivers and hairpins that are simple only at full floating-
-# point precision.
+# Normalize finished rolling-cut boundaries at a finer precision than Boolean
+# clearance or analytic tessellation, then verify the same precision exposes
+# no surviving near-coincident slivers or hairpins.
 OUTLINE_CONNECTIVITY_TOLERANCE_FACTOR = 1e-8
 # Keep the backtracking-edge threshold below the analytic chord budget; smooth
 # analytic vertices and genuine longer concave features remain untouched.
