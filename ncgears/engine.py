@@ -23,13 +23,18 @@ from shapely import (
     Geometry,
     affinity,
     line_merge,
+    linestrings,
     make_valid,
     node,
     set_precision,
     union_all,
 )
+from shapely import (
+    points as shapely_points,
+)
 from shapely.geometry import LineString, MultiPolygon, Point, Polygon
 from shapely.ops import nearest_points
+from shapely.strtree import STRtree
 
 from ._policy import (
     ANALYTIC_CHORD_ACCEPTANCE_SLACK,
@@ -334,6 +339,61 @@ class _QuinticSeries:
         else:
             result = (6.0 * a3 + t * (24.0 * a4 + t * 60.0 * a5)) / (step**3)
         return float(result) if scalar else np.asarray(result, dtype=float)
+
+    def evaluate(
+        self,
+        value: float | FloatArray,
+        derivatives: tuple[int, ...],
+    ) -> tuple[float | FloatArray, ...]:
+        """Evaluate several derivatives while resolving the segment once."""
+
+        if not derivatives or any(
+            derivative not in {0, 1, 2, 3} for derivative in derivatives
+        ):
+            raise ValueError("Derivative orders must be between 0 and 3")
+
+        scalar = np.ndim(value) == 0
+        phi = np.asarray(value, dtype=float)
+        count = len(self.values)
+        if self.periodic:
+            cycles = np.floor((phi - self.domain_start) / self.period)
+            x = phi - cycles * self.period
+            x = np.where(x < self.domain_start, x + self.period, x)
+            x = np.where(x >= self.domain_start + self.period, x - self.period, x)
+        else:
+            cycles = np.zeros_like(phi)
+            x = np.clip(phi, self.domain_start, self.domain_end)
+
+        scaled = (x - self.domain_start) / self.step
+        index = np.floor(scaled).astype(np.int64)
+        t = scaled - index
+        if not self.periodic:
+            at_end = index >= count - 1
+            index = np.where(at_end, count - 2, index)
+            t = np.where(at_end, 1.0, t)
+        index = np.clip(index, 0, count - 1)
+        a0, a1, a2, a3, a4, a5 = (
+            coefficient[index] for coefficient in self.coefficients
+        )
+        step = self.step
+
+        results: list[float | FloatArray] = []
+        for derivative in derivatives:
+            if derivative == 0:
+                result = a0 + t * (a1 + t * (a2 + t * (a3 + t * (a4 + t * a5))))
+                result = result + cycles * self.cycle_delta
+            elif derivative == 1:
+                result = (
+                    a1 + t * (2.0 * a2 + t * (3.0 * a3 + t * (4.0 * a4 + t * 5.0 * a5)))
+                ) / step
+            elif derivative == 2:
+                result = (
+                    2.0 * a2 + t * (6.0 * a3 + t * (12.0 * a4 + t * 20.0 * a5))
+                ) / (step * step)
+            else:
+                result = (6.0 * a3 + t * (24.0 * a4 + t * 60.0 * a5)) / (step**3)
+            results.append(float(result) if scalar else np.asarray(result, dtype=float))
+        return tuple(results)
 
     def shift_residual_bounds(
         self, shift: float, expected_value_delta: float
@@ -860,6 +920,10 @@ class _GearGenerator:
             periodic=self.closed,
             cycle_delta=config.cycle_delta,
         )
+        self._singular_arc_cache: dict[
+            tuple[bool, float, int, float, float], tuple[float, ...]
+        ] = {}
+        self._boundary_tree_cache: dict[int, tuple[FloatArray, STRtree]] = {}
         self._validate()
         self.drive_teeth = config.teeth
         self.active_start = config.domain_start if self.closed else config.active_start
@@ -973,12 +1037,12 @@ class _GearGenerator:
             )
 
     def _w(self, phi: float | FloatArray) -> float | FloatArray:
-        first = self._psi(phi, 1)
-        return np.hypot(self._psi(phi, 2), first * (1.0 + first))
+        first, second = self.motion.evaluate(phi, (1, 2))
+        return np.hypot(second, first * (1.0 + first))
 
     def _arc_density(self, phi: float | FloatArray) -> float | FloatArray:
-        first = self._psi(phi, 1)
-        return self._w(phi) / (1.0 + first) ** 2
+        first, second = self.motion.evaluate(phi, (1, 2))
+        return np.hypot(second, first * (1.0 + first)) / (1.0 + first) ** 2
 
     def _drive_radius(self, phi: float | FloatArray) -> float | FloatArray:
         first = self._psi(phi, 1)
@@ -1009,10 +1073,11 @@ class _GearGenerator:
         self, phi: float | FloatArray
     ) -> complex | NDArray[np.complex128]:
         values = np.asarray(phi, dtype=float)
-        first = np.asarray(self._psi(values, 1), dtype=float)
-        second = np.asarray(self._psi(values, 2), dtype=float)
-        base = (second - 1j * first * (1.0 + first)) / np.asarray(
-            self._w(values), dtype=float
+        first, second = self.motion.evaluate(values, (1, 2))
+        first = np.asarray(first, dtype=float)
+        second = np.asarray(second, dtype=float)
+        base = (second - 1j * first * (1.0 + first)) / np.hypot(
+            second, first * (1.0 + first)
         )
         result = base * np.exp(-1j * values)
         return complex(result) if result.ndim == 0 else result
@@ -1021,34 +1086,36 @@ class _GearGenerator:
         self, phi: float | FloatArray
     ) -> complex | NDArray[np.complex128]:
         values = np.asarray(phi, dtype=float)
-        first = np.asarray(self._psi(values, 1), dtype=float)
-        second = np.asarray(self._psi(values, 2), dtype=float)
-        base = (second - 1j * first * (1.0 + first)) / np.asarray(
-            self._w(values), dtype=float
+        psi, first, second = self.motion.evaluate(values, (0, 1, 2))
+        psi = np.asarray(psi, dtype=float)
+        first = np.asarray(first, dtype=float)
+        second = np.asarray(second, dtype=float)
+        base = (second - 1j * first * (1.0 + first)) / np.hypot(
+            second, first * (1.0 + first)
         )
-        result = base * np.exp(1j * np.asarray(self._psi(values), dtype=float))
+        result = base * np.exp(1j * psi)
         return complex(result) if result.ndim == 0 else result
 
     def _drive_curvature(self, phi: FloatArray) -> FloatArray:
-        first = np.asarray(self._psi(phi, 1))
-        second = np.asarray(self._psi(phi, 2))
-        w = np.asarray(self._w(phi))
+        first, second, third = self.motion.evaluate(phi, (1, 2, 3))
+        first = np.asarray(first)
+        second = np.asarray(second)
+        third = np.asarray(third)
+        w = np.hypot(second, first * (1.0 + first))
         h = (
             (1.0 + first)
-            * (first * (self._psi(phi, 3) - first - first**2) - 2.0 * second**2)
+            * (first * (third - first - first**2) - 2.0 * second**2)
             / w**2
         )
         return (1.0 + first) ** 2 * h / (self.center_distance * w)
 
     def _driven_curvature(self, phi: FloatArray) -> FloatArray:
-        first = np.asarray(self._psi(phi, 1))
-        second = np.asarray(self._psi(phi, 2))
-        w = np.asarray(self._w(phi))
-        h = (
-            (1.0 + first)
-            * (first * (self._psi(phi, 3) + first**2 + first**3) - second**2)
-            / w**2
-        )
+        first, second, third = self.motion.evaluate(phi, (1, 2, 3))
+        first = np.asarray(first)
+        second = np.asarray(second)
+        third = np.asarray(third)
+        w = np.hypot(second, first * (1.0 + first))
+        h = (1.0 + first) * (first * (third + first**2 + first**3) - second**2) / w**2
         return (1.0 + first) ** 2 * h / (self.center_distance * w)
 
     def _measure_centrodes(self) -> None:
@@ -1200,19 +1267,42 @@ class _GearGenerator:
         pitch = math.pi * self.config.module
         values = np.asarray(common_arc, dtype=float)
         phi = self._phi_from_common_arc(values)
-        centrode = (
-            np.asarray(self._driven_centrode(phi), dtype=np.complex128)
-            if driven
-            else np.asarray(self._drive_centrode(phi), dtype=np.complex128)
-        )
-        tangent = (
-            np.asarray(self._driven_tangent(phi), dtype=np.complex128)
-            if driven
-            else np.asarray(self._drive_tangent(phi), dtype=np.complex128)
-        )
+        centrode, tangent = self._analytic_frame(driven, phi)
         rack_coordinate = sign * 0.25 * pitch - (values - tooth_phase * pitch)
         direction = complex(math.cos(self.alpha), sign * math.sin(self.alpha))
         return centrode + rack_coordinate * tangent * direction * math.cos(self.alpha)
+
+    def _analytic_frame(
+        self,
+        driven: bool,
+        phi: FloatArray,
+    ) -> tuple[NDArray[np.complex128], NDArray[np.complex128]]:
+        """Evaluate a centrode and its unit tangent from one motion lookup."""
+
+        values = np.asarray(phi, dtype=float)
+        if driven:
+            psi, first, second = self.motion.evaluate(values, (0, 1, 2))
+            angle = np.asarray(psi, dtype=float)
+            radius = self.center_distance / (1.0 + np.asarray(first, dtype=float))
+            rotation = np.exp(1j * angle)
+            centrode = -radius * rotation
+        else:
+            first, second = self.motion.evaluate(values, (1, 2))
+            first = np.asarray(first, dtype=float)
+            angle = -values
+            radius = self.center_distance * first / (1.0 + first)
+            rotation = np.exp(1j * angle)
+            centrode = radius * rotation
+        first = np.asarray(first, dtype=float)
+        second = np.asarray(second, dtype=float)
+        base = (second - 1j * first * (1.0 + first)) / np.hypot(
+            second, first * (1.0 + first)
+        )
+        tangent = base * rotation
+        return (
+            np.asarray(centrode, dtype=np.complex128),
+            np.asarray(tangent, dtype=np.complex128),
+        )
 
     def _analytic_offset_points(
         self,
@@ -1223,16 +1313,7 @@ class _GearGenerator:
     ) -> NDArray[np.complex128]:
         values = np.asarray(common_arc, dtype=float)
         phi = self._phi_from_common_arc(values)
-        centrode = (
-            np.asarray(self._driven_centrode(phi), dtype=np.complex128)
-            if driven
-            else np.asarray(self._drive_centrode(phi), dtype=np.complex128)
-        )
-        tangent = (
-            np.asarray(self._driven_tangent(phi), dtype=np.complex128)
-            if driven
-            else np.asarray(self._drive_tangent(phi), dtype=np.complex128)
-        )
+        centrode, tangent = self._analytic_frame(driven, phi)
         outward_normal = (-1j if driven else 1j) * tangent
         return centrode + height * outward_normal
 
@@ -1256,16 +1337,7 @@ class _GearGenerator:
         pitch = math.pi * self.config.module
         values = np.asarray(common_arc, dtype=float)
         phi = self._phi_from_common_arc(values)
-        centrode = (
-            np.asarray(self._driven_centrode(phi), dtype=np.complex128)
-            if driven
-            else np.asarray(self._drive_centrode(phi), dtype=np.complex128)
-        )
-        tangent = (
-            np.asarray(self._driven_tangent(phi), dtype=np.complex128)
-            if driven
-            else np.asarray(self._drive_tangent(phi), dtype=np.complex128)
-        )
+        centrode, tangent = self._analytic_frame(driven, phi)
         rack_coordinate = sign * 0.25 * pitch - (values - tooth_phase * pitch)
         root_height = self.dedendum - self.fillet_radius
         if driven:
@@ -1475,6 +1547,11 @@ class _GearGenerator:
     ) -> tuple[float, ...]:
         """Locate every cusp on a candidate working-flank interval."""
 
+        cache_key = (driven, tooth_phase, sign, start_arc, end_arc)
+        cached = self._singular_arc_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         pitch = math.pi * self.config.module
         phase_arc = tooth_phase * pitch
         low = min(start_arc, end_arc)
@@ -1569,7 +1646,9 @@ class _GearGenerator:
             previous_roots = roots
             sample_count = min(2 * sample_count, CUSP_MAX_SAMPLES)
 
-        return tuple(roots)
+        result = tuple(roots)
+        self._singular_arc_cache[cache_key] = result
+        return result
 
     def _analytic_singular_arc(
         self,
@@ -2592,6 +2671,13 @@ class _GearGenerator:
         translate_x: float = 0.0,
         translate_y: float = 0.0,
     ) -> Geometry:
+        if isinstance(geometry, Polygon) and not geometry.interiors:
+            return _transform_outline(
+                np.asarray(geometry.exterior.coords, dtype=float),
+                angle,
+                translate_x,
+                translate_y,
+            )
         cosine = math.cos(angle)
         sine = math.sin(angle)
         return affinity.affine_transform(
@@ -2687,6 +2773,28 @@ class _GearGenerator:
             common_arc=common_arc,
         )
 
+    def _boundary_distances(
+        self,
+        outline: FloatArray,
+        coordinates: FloatArray,
+    ) -> FloatArray:
+        """Measure exact point-to-boundary distances using a reusable index."""
+
+        cache_key = id(outline)
+        cached = self._boundary_tree_cache.get(cache_key)
+        if cached is None or cached[0] is not outline:
+            segment_coordinates = np.stack((outline[:-1], outline[1:]), axis=1)
+            tree = STRtree(linestrings(segment_coordinates))
+            self._boundary_tree_cache[cache_key] = (outline, tree)
+        else:
+            tree = cached[1]
+        _, distances = tree.query_nearest(
+            shapely_points(np.asarray(coordinates, dtype=float)),
+            return_distance=True,
+            all_matches=False,
+        )
+        return np.asarray(distances, dtype=float)
+
     def _protected_flank_guard(
         self,
         spans: tuple[_ProtectedFlankSpan, ...],
@@ -2768,7 +2876,6 @@ class _GearGenerator:
     ) -> tuple[tuple[_ProtectedFlankSpan, ...], int]:
         """Keep only the exposed component connected to each addendum tip."""
 
-        boundary = LineString(outline)
         boundary_tolerance = chord_error + _length_tolerance(
             self.config.module,
             ANALYTIC_CHORD_TOLERANCE_FACTOR + GEOMETRY_LENGTH_TOLERANCE_FACTOR,
@@ -2788,13 +2895,12 @@ class _GearGenerator:
                 sign=span.sign,
                 common_arc=common_arc,
             )
-            exposed = np.asarray(
-                [
-                    boundary.distance(Point(point.real, point.imag))
-                    <= boundary_tolerance
-                    for point in points
-                ],
-                dtype=bool,
+            exposed = (
+                self._boundary_distances(
+                    outline,
+                    np.column_stack((points.real, points.imag)),
+                )
+                <= boundary_tolerance
             )
             tip_index = int(np.argmin(np.abs(common_arc - span.tip_arc)))
             if not exposed[tip_index]:
@@ -2834,7 +2940,6 @@ class _GearGenerator:
     ) -> tuple[float, float]:
         """Sample-check regularity and exposure of retained exact flanks."""
 
-        boundary = LineString(outline)
         boundary_tolerance = chord_error + _length_tolerance(
             self.config.module,
             ANALYTIC_CHORD_TOLERANCE_FACTOR + GEOMETRY_LENGTH_TOLERANCE_FACTOR,
@@ -2895,8 +3000,13 @@ class _GearGenerator:
                     f"{member.capitalize()} protected working flank is singular "
                     f"for tooth {span.phase:g}, sign {span.sign}"
                 )
-            span_boundary_error = max(
-                boundary.distance(Point(point.real, point.imag)) for point in points
+            span_boundary_error = float(
+                np.max(
+                    self._boundary_distances(
+                        outline,
+                        np.column_stack((points.real, points.imag)),
+                    )
+                )
             )
             maximum_boundary_error = max(maximum_boundary_error, span_boundary_error)
             if span_boundary_error > boundary_tolerance:
@@ -3114,6 +3224,32 @@ class _GearGenerator:
             OUTLINE_CONNECTIVITY_TOLERANCE_FACTOR,
         )
         psi_start = float(self._psi(self.active_start))
+        pose_grids: list[tuple[tuple[float, float, float], ...]] = []
+        for offset in ROLLING_STAGGER_OFFSETS:
+            fractions = (
+                (np.arange(phase_count) + offset) / phase_count
+                if self.closed
+                else np.clip(
+                    (np.arange(phase_count) + offset) / max(1, phase_count - 1),
+                    0.0,
+                    1.0,
+                )
+            )
+            phis = self.active_start + (self.active_end - self.active_start) * fractions
+            drive_angles = phis - self.active_start
+            driven_angles = -(np.asarray(self._psi(phis), dtype=float) - psi_start)
+            relative_angles = driven_angles - drive_angles
+            center_x = self.center_distance * np.cos(drive_angles)
+            center_y = -self.center_distance * np.sin(drive_angles)
+            pose_grids.append(
+                tuple(
+                    zip(
+                        relative_angles.tolist(),
+                        center_x.tolist(),
+                        center_y.tolist(),
+                    )
+                )
+            )
         initial_overlap = 0.0
         remaining_overlap = 0.0
         total_removed_area = 0.0
@@ -3151,33 +3287,17 @@ class _GearGenerator:
             pass_count = pass_index + 1
             pass_removed_area = 0.0
             pass_maximum_overlap = 0.0
-            for offset in ROLLING_STAGGER_OFFSETS:
-                fractions = (
-                    (np.arange(phase_count) + offset) / phase_count
-                    if self.closed
-                    else np.clip(
-                        (np.arange(phase_count) + offset) / max(1, phase_count - 1),
-                        0.0,
-                        1.0,
-                    )
-                )
+            for offset, poses in zip(ROLLING_STAGGER_OFFSETS, pose_grids):
                 drive_cuts: list[Geometry] = []
                 driven_cuts: list[Geometry] = []
                 grid_maximum = 0.0
 
                 def phase_nonworking_cut(
-                    fraction: float,
+                    pose: tuple[float, float, float],
                     current_drive: Geometry = drive_geometry,
                     current_driven: Geometry = driven_geometry,
                 ) -> tuple[float, Geometry | None, Geometry | None]:
-                    phi = self.active_start + (
-                        self.active_end - self.active_start
-                    ) * float(fraction)
-                    drive_angle = phi - self.active_start
-                    driven_angle = -(float(self._psi(phi)) - psi_start)
-                    relative_angle = driven_angle - drive_angle
-                    center_x = self.center_distance * math.cos(drive_angle)
-                    center_y = -self.center_distance * math.sin(drive_angle)
+                    relative_angle, center_x, center_y = pose
                     placed_driven = self._place_geometry(
                         current_driven,
                         relative_angle,
@@ -3188,34 +3308,21 @@ class _GearGenerator:
                     area = float(overlap.area)
                     if area <= overlap_tolerance:
                         return area, None, None
-                    placed_driven_exclusion = self._place_geometry(
-                        driven_exclusion,
-                        relative_angle,
-                        center_x,
-                        center_y,
-                    )
-                    placed_driven_trim_zone = self._place_geometry(
-                        driven_trim_zone,
-                        relative_angle,
-                        center_x,
-                        center_y,
-                    )
                     drive_overlap = overlap.intersection(drive_trim_zone).difference(
                         drive_exclusion
                     )
-                    driven_overlap = overlap.intersection(
-                        placed_driven_trim_zone
-                    ).difference(placed_driven_exclusion)
+                    local_overlap = self._unplace_geometry(
+                        overlap,
+                        relative_angle,
+                        center_x,
+                        center_y,
+                    )
+                    driven_overlap = local_overlap.intersection(
+                        driven_trim_zone
+                    ).difference(driven_exclusion)
                     local_drive_cut = polygonal_cut(drive_overlap)
                     local_driven_cut = (
-                        polygonal_cut(
-                            self._unplace_geometry(
-                                make_valid(driven_overlap),
-                                relative_angle,
-                                center_x,
-                                center_y,
-                            )
-                        )
+                        polygonal_cut(driven_overlap)
                         if not driven_overlap.is_empty
                         else None
                     )
@@ -3226,11 +3333,11 @@ class _GearGenerator:
                     )
 
                 with ThreadPoolExecutor(
-                    max_workers=min(_MAX_GEOMETRY_WORKERS, len(fractions))
+                    max_workers=min(_MAX_GEOMETRY_WORKERS, len(poses))
                 ) as executor:
                     phase_results = executor.map(
                         phase_nonworking_cut,
-                        (float(value) for value in fractions),
+                        poses,
                     )
                     for (
                         area,
@@ -3242,7 +3349,7 @@ class _GearGenerator:
                             drive_cuts.append(drive_overlap)
                         if driven_overlap is not None:
                             driven_cuts.append(driven_overlap)
-                total_phases += len(fractions)
+                total_phases += len(poses)
                 if pass_index == 0 and offset == 0.0:
                     initial_overlap = grid_maximum
                 pass_maximum_overlap = max(pass_maximum_overlap, grid_maximum)
