@@ -39,6 +39,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--pressure-angle", type=float, default=DEFAULT_PRESSURE_ANGLE_DEG
     )
+    clearance = parser.add_mutually_exclusive_group()
+    clearance.add_argument(
+        "--clearance",
+        type=float,
+        default=0.0,
+        help="inward offset of each gear face, normalized by module",
+    )
+    clearance.add_argument(
+        "--max-backlash",
+        type=float,
+        dest="max_backlash_deg",
+        metavar="DEGREES",
+        help="size clearance for this maximum driven-gear backlash",
+    )
     parser.add_argument("--open", action="store_true", dest="open_")
     parser.add_argument("--drive-start", type=float, default=0.0)
     parser.add_argument("--drive-end", type=float, default=2.0 * math.pi)
@@ -88,6 +102,8 @@ def main(argv: list[str] | None = None) -> int:
         "teeth": args.teeth,
         "module": args.module,
         "pressure_angle_deg": args.pressure_angle,
+        "clearance": args.clearance,
+        "max_backlash_deg": args.max_backlash_deg,
         "drive_start": args.drive_start,
         "drive_end": args.drive_end,
         "period": args.period,

@@ -98,6 +98,24 @@ class GearPair:
         return float(self.metadata["maximum_transmission_error"])
 
     @property
+    def clearance(self) -> float:
+        """Inward offset of each gear face, normalized by module."""
+
+        return float(self.metadata.get("clearance_module_fraction", 0.0))
+
+    @property
+    def minimum_backlash_deg(self) -> float:
+        """Minimum total driven-gear angular free play, in degrees."""
+
+        return float(self.metadata.get("minimum_backlash_deg", 0.0))
+
+    @property
+    def maximum_backlash_deg(self) -> float:
+        """Maximum total driven-gear angular free play, in degrees."""
+
+        return float(self.metadata.get("maximum_backlash_deg", 0.0))
+
+    @property
     def placed_driven_outline(self) -> NDArray[np.float64]:
         """Driven outline translated into its assembled position."""
 
@@ -273,9 +291,15 @@ class GearPair:
     def summary(self) -> str:
         """Return a compact human-readable verification summary."""
 
-        return (
+        summary = (
             f"{self.metadata['name']}: {self.drive_teeth}:{self.driven_teeth} teeth, "
             f"center distance {self.center_distance:.6g}, "
             f"ratio {self.ratio:.6g}, maximum transmission error "
             f"{math.degrees(self.maximum_transmission_error):.4g}°"
         )
+        if self.maximum_backlash_deg > 0.0:
+            summary += (
+                f", backlash {self.minimum_backlash_deg:.4g}°–"
+                f"{self.maximum_backlash_deg:.4g}°"
+            )
+        return summary

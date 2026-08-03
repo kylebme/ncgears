@@ -73,6 +73,11 @@ OUTLINE_COLLINEAR_TOLERANCE_FRACTION = 0.02
 # clearance or analytic tessellation, then verify the same precision exposes
 # no surviving near-coincident slivers or hairpins.
 OUTLINE_CONNECTIVITY_TOLERANCE_FACTOR = 1e-8
+# A clearance operation creates circular joins where an inward parallel curve
+# crosses a re-entrant polygon vertex. Keep those joins comfortably below the
+# analytic outline chord-error budget without multiplying already-dense flank
+# vertices excessively.
+CLEARANCE_BUFFER_QUADRANT_SEGMENTS = 32
 # Keep the backtracking-edge threshold below the analytic chord budget; smooth
 # analytic vertices and genuine longer concave features remain untouched.
 OUTLINE_BACKTRACK_TOLERANCE_MULTIPLIER = 100.0

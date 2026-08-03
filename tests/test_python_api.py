@@ -212,6 +212,16 @@ def test_cli_accepts_interactive_plot_option() -> None:
     assert args.plot is True
 
 
+def test_cli_accepts_clearance_or_maximum_backlash() -> None:
+    clearance = build_parser().parse_args(["phi", "--clearance", "0.04"])
+    backlash = build_parser().parse_args(["phi", "--max-backlash", "1.5"])
+
+    assert clearance.clearance == pytest.approx(0.04)
+    assert clearance.max_backlash_deg is None
+    assert backlash.clearance == 0.0
+    assert backlash.max_backlash_deg == pytest.approx(1.5)
+
+
 def test_transmission_frontend_samples_motion_law(tmp_path: Path) -> None:
     sentinel = object()
     with patch("ncgears.api._run_generator", return_value=sentinel) as run:
@@ -235,6 +245,19 @@ def test_transmission_frontend_samples_motion_law(tmp_path: Path) -> None:
     assert run.call_args.kwargs["cycle_delta"] == pytest.approx(2.0 * math.pi)
     assert run.call_args.kwargs["active_end"] == pytest.approx(2.0 * math.pi)
     assert run.call_args.kwargs["plot"] is True
+
+
+def test_transmission_frontend_forwards_normalized_clearance(tmp_path: Path) -> None:
+    with patch("ncgears.api._run_generator") as run:
+        ncgears.generate(
+            "phi",
+            clearance=0.04,
+            samples=1024,
+            output_directory=tmp_path,
+        )
+
+    assert run.call_args.kwargs["clearance"] == pytest.approx(0.04)
+    assert run.call_args.kwargs["max_backlash_deg"] is None
 
 
 def test_centrode_frontend_samples_radius_and_derivatives(tmp_path: Path) -> None:
@@ -274,6 +297,29 @@ def test_invalid_transmission_is_rejected(
             expression,
             samples=1024,
             output_directory=tmp_path,
+        )
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        ({"clearance": -0.01}, "clearance must be"),
+        ({"max_backlash_deg": -1.0}, "max_backlash_deg must be"),
+        (
+            {"clearance": 0.02, "max_backlash_deg": 1.0},
+            "mutually exclusive",
+        ),
+    ],
+)
+def test_invalid_clearance_is_rejected(
+    arguments: dict[str, float], message: str, tmp_path: Path
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        ncgears.generate(
+            "phi",
+            samples=1024,
+            output_directory=tmp_path,
+            **arguments,
         )
 
 

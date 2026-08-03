@@ -107,6 +107,8 @@ def _validate_common(
     addendum_factor: float,
     dedendum_factor: float,
     fillet_factor: float,
+    clearance: float,
+    max_backlash_deg: float | None,
     drive_start: float,
     drive_end: float,
     period: float,
@@ -134,6 +136,14 @@ def _validate_common(
         )
     if dedendum_factor <= fillet_factor:
         raise ValueError("dedendum_factor must exceed fillet_factor")
+    if not math.isfinite(clearance) or clearance < 0.0:
+        raise ValueError("clearance must be finite and nonnegative")
+    if max_backlash_deg is not None and (
+        not math.isfinite(max_backlash_deg) or max_backlash_deg < 0.0
+    ):
+        raise ValueError("max_backlash_deg must be finite and nonnegative")
+    if clearance != 0.0 and max_backlash_deg is not None:
+        raise ValueError("clearance and max_backlash_deg are mutually exclusive")
     if not drive_start < drive_end:
         raise ValueError("drive_start must be less than drive_end")
     if period <= 0.0:
@@ -176,6 +186,8 @@ def _run_generator(
     addendum_factor: float,
     dedendum_factor: float,
     fillet_factor: float,
+    clearance: float,
+    max_backlash_deg: float | None,
     domain_start: float,
     domain_end: float,
     active_start: float,
@@ -206,6 +218,8 @@ def _run_generator(
             addendum_factor=addendum_factor,
             dedendum_factor=dedendum_factor,
             fillet_factor=fillet_factor,
+            clearance=clearance,
+            max_backlash_deg=max_backlash_deg,
             domain_start=domain_start,
             domain_end=domain_end,
             active_start=active_start,
@@ -265,6 +279,8 @@ def generate_from_transmission(
     addendum_factor: float = DEFAULT_ADDENDUM_FACTOR,
     dedendum_factor: float = DEFAULT_DEDENDUM_FACTOR,
     fillet_factor: float = DEFAULT_FILLET_FACTOR,
+    clearance: float = 0.0,
+    max_backlash_deg: float | None = None,
     drive_start: float = 0.0,
     drive_end: float = 2.0 * math.pi,
     period: float = 2.0 * math.pi,
@@ -283,6 +299,11 @@ def generate_from_transmission(
     driven angle. For example, ``"phi - 0.08*sin(2*phi)"`` produces a smooth
     variable-speed 1:1 pair. The returned :class:`GearPair` contains NumPy
     outlines, verification metadata, preview rendering, and SVG/DXF exports.
+
+    ``clearance`` is the inward face offset applied to each gear, normalized by
+    ``module``. Alternatively, ``max_backlash_deg`` derives that offset from
+    the requested maximum total angular free play of the driven gear. The two
+    options are mutually exclusive.
     """
 
     _validate_common(
@@ -293,6 +314,8 @@ def generate_from_transmission(
         addendum_factor=addendum_factor,
         dedendum_factor=dedendum_factor,
         fillet_factor=fillet_factor,
+        clearance=clearance,
+        max_backlash_deg=max_backlash_deg,
         drive_start=drive_start,
         drive_end=drive_end,
         period=period,
@@ -385,6 +408,8 @@ def generate_from_transmission(
         addendum_factor=addendum_factor,
         dedendum_factor=dedendum_factor,
         fillet_factor=fillet_factor,
+        clearance=clearance,
+        max_backlash_deg=max_backlash_deg,
         domain_start=domain_start,
         domain_end=domain_end,
         active_start=active_start,
@@ -411,6 +436,8 @@ def generate_from_centrode(
     addendum_factor: float = DEFAULT_ADDENDUM_FACTOR,
     dedendum_factor: float = DEFAULT_DEDENDUM_FACTOR,
     fillet_factor: float = DEFAULT_FILLET_FACTOR,
+    clearance: float = 0.0,
+    max_backlash_deg: float | None = None,
     drive_start: float = 0.0,
     drive_end: float = 2.0 * math.pi,
     period: float = 2.0 * math.pi,
@@ -430,6 +457,8 @@ def generate_from_centrode(
     The radius expression may use arbitrary units. It is scaled so the drive
     pitch length equals ``teeth * pi * module``. When no reference center
     distance is supplied, ncgears solves one for ``target_cycle_delta``.
+    ``clearance`` and ``max_backlash_deg`` have the same meanings as in
+    :func:`generate_from_transmission`.
     """
 
     _validate_common(
@@ -440,6 +469,8 @@ def generate_from_centrode(
         addendum_factor=addendum_factor,
         dedendum_factor=dedendum_factor,
         fillet_factor=fillet_factor,
+        clearance=clearance,
+        max_backlash_deg=max_backlash_deg,
         drive_start=drive_start,
         drive_end=drive_end,
         period=period,
@@ -514,6 +545,8 @@ def generate_from_centrode(
         addendum_factor=addendum_factor,
         dedendum_factor=dedendum_factor,
         fillet_factor=fillet_factor,
+        clearance=clearance,
+        max_backlash_deg=max_backlash_deg,
         domain_start=domain_start,
         domain_end=domain_end,
         active_start=active_start,

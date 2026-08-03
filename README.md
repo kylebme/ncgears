@@ -37,6 +37,12 @@ ncgears "phi - 0.08*sin(2*phi)" --teeth 24 --module 1.5 \
 
 ncgears "1 + 0.08*cos(2*phi)" --centrode --teeth 20 \
   --name centrode_two_lobe
+
+# Offset every face inward by 0.04 module on each gear.
+ncgears "phi - 0.08*sin(2*phi)" --clearance 0.04
+
+# Or derive the offset for at most 1.5 degrees of driven-gear backlash.
+ncgears "phi - 0.08*sin(2*phi)" --max-backlash 1.5
 ```
 
 Run `ncgears --help` for all commonly used options.
@@ -74,11 +80,14 @@ pair.drive_teeth
 pair.driven_teeth
 pair.ratio
 pair.maximum_transmission_error
-pair.metadata                # complete verification report
-pair.directory               # CSV and JSON source files
-pair.render()                # pair.png; requires ncgears[plot]
-pair.render_gif()            # pair.gif; follows the generated motion law
-pair.plot()                  # interactive motion slider, zoom, and pan
+pair.clearance                 # per-face inward offset / module
+pair.minimum_backlash_deg      # total driven-gear angular free play
+pair.maximum_backlash_deg
+pair.metadata                 # complete verification report
+pair.directory                # CSV and JSON source files
+pair.render()                 # pair.png; requires ncgears[plot]
+pair.render_gif()             # pair.gif; follows the generated motion law
+pair.plot()                   # interactive motion slider, zoom, and pan
 ```
 
 Pass `plot=True` to `generate()` or `generate_from_centrode()` to open the
@@ -92,6 +101,33 @@ figure.suptitle("My mechanism")
 
 The output directory defaults to `out/<name>/`. Each successful generation
 contains `drive.csv`, `driven.csv`, `metadata.json`, and the sampled input.
+
+## Clearance and backlash
+
+Pass `clearance` to offset both finished gear solids inward, normal to every
+face. The value is dimensionless: `clearance=0.04` offsets each gear by
+`0.04 * module`, producing twice that normal separation between a mating pair
+of faces.
+
+Alternatively, pass `max_backlash_deg` to specify the maximum conventional
+backlash: the total driven-gear rotation between contact on opposing flanks.
+For a noncircular pair the local driven pitch radius changes, so backlash also
+changes. ncgears chooses the face offset at the minimum driven pitch radius and
+reports both the requested maximum and the resulting minimum:
+
+```python
+pair = ncgears.generate(
+    "phi - 0.08*sin(2*phi)",
+    max_backlash_deg=1.5,
+)
+print(pair.minimum_backlash_deg, pair.maximum_backlash_deg)
+```
+
+Conjugacy, protected-flank contact, and transmission error are verified before
+the intentional offset. The delivered outlines are then independently checked
+for validity, a single connected boundary, strict inward containment, retained
+tip thickness, and sampled assembled-pair interference. These stages and the
+resolved physical offset are recorded in `metadata.json`.
 
 ## Start from a pitch curve
 

@@ -28,6 +28,7 @@ from ncgears._policy import (
 from ncgears.engine import (
     EngineConfig,
     _GearGenerator,
+    _offset_outline_normal,
     _verify_single_connected_outline,
 )
 
@@ -172,6 +173,55 @@ def test_outline_connectivity_verification_rejects_precision_hairpin() -> None:
         _verify_single_connected_outline(hairpin, label="drive", tolerance=1e-8)
 
 
+def test_constant_normal_offset_erodes_one_connected_solid() -> None:
+    square = np.array(
+        [[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0], [0.0, 0.0]]
+    )
+
+    outline, minimum_offset = _offset_outline_normal(
+        square,
+        0.25,
+        label="test",
+        module=1.0,
+    )
+
+    assert Polygon(outline).bounds == pytest.approx((0.25, 0.25, 3.75, 3.75))
+    assert Polygon(outline).area == pytest.approx(3.5**2)
+    assert minimum_offset == pytest.approx(0.25)
+
+
+def test_maximum_backlash_offsets_both_finished_gears(tmp_path: Path) -> None:
+    requested_maximum = 1.5
+    pair = ncgears.generate(
+        "phi - 0.08*sin(2*phi)",
+        name="maximum_backlash",
+        teeth=16,
+        max_backlash_deg=requested_maximum,
+        samples=1024,
+        samples_per_radian=20,
+        output_directory=tmp_path,
+    )
+
+    _assert_verified_pair(pair)
+    assert pair.metadata["clearance_mode"] == "maximum_backlash"
+    assert pair.clearance > 0.0
+    assert pair.maximum_backlash_deg == pytest.approx(requested_maximum)
+    assert 0.0 < pair.minimum_backlash_deg < pair.maximum_backlash_deg
+    assert pair.metadata["preclearance_drive_area"] > pair.metadata["drive_area"]
+    assert pair.metadata["preclearance_driven_area"] > pair.metadata["driven_area"]
+    chord_tolerance = ANALYTIC_CHORD_TOLERANCE_FACTOR * pair.metadata["module"]
+    for key in ("drive_minimum_face_offset", "driven_minimum_face_offset"):
+        assert pair.metadata[key] + chord_tolerance >= pair.metadata[
+            "clearance_distance"
+        ]
+    assert pair.metadata["preclearance_outline_connectivity_verified"] is True
+    assert pair.metadata["postclearance_outline_connectivity_verified"] is True
+    assert pair.metadata["contact_verification_stage"] == "preclearance"
+    assert pair.metadata["placed_pair_overlap_area"] <= pair.metadata[
+        "overlap_area_tolerance"
+    ]
+
+
 def test_mixed_harmonic_centrode_rejects_finished_geometry_interference(
     tmp_path: Path,
 ) -> None:
@@ -274,6 +324,7 @@ def test_geometry_tolerances_scale_with_module(tmp_path: Path) -> None:
             name=f"scale_{module:g}",
             teeth=12,
             module=module,
+            clearance=0.04,
             samples=1024,
             samples_per_radian=20,
             output_directory=tmp_path,
@@ -282,6 +333,11 @@ def test_geometry_tolerances_scale_with_module(tmp_path: Path) -> None:
     ]
     small, unit = pairs
 
+    assert small.clearance == pytest.approx(0.04)
+    assert unit.clearance == pytest.approx(0.04)
+    assert small.maximum_backlash_deg == pytest.approx(
+        unit.maximum_backlash_deg
+    )
     assert small.drive_outline.shape == unit.drive_outline.shape
     assert small.driven_outline.shape == unit.driven_outline.shape
     assert np.allclose(

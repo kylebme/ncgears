@@ -44,6 +44,7 @@ from ._policy import (
     CENTRODE_CONVEXITY_CURVATURE_FACTOR,
     CENTRODE_FIDELITY_ALLOWANCE_MODULES,
     CENTRODE_OUTLINE_SAMPLES_PER_TOOTH,
+    CLEARANCE_BUFFER_QUADRANT_SEGMENTS,
     CONTACT_AREA_TOLERANCE_FACTOR,
     CONTACT_RECOVERY_PHASE_OFFSET,
     CONTACT_RECOVERY_PHASES_CLOSED,
@@ -178,6 +179,8 @@ class EngineConfig:
     input_mode: str
     samples: FloatArray
     reference_center_distance: float = 0.0
+    clearance: float = 0.0
+    max_backlash_deg: float | None = None
 
 
 @dataclass(frozen=True)
@@ -584,6 +587,70 @@ def _verify_single_connected_outline(
     )
 
 
+def _offset_outline_normal(
+    points: FloatArray,
+    distance: float,
+    *,
+    label: str,
+    module: float,
+) -> tuple[FloatArray, float]:
+    """Erode one solid by a constant face-normal distance.
+
+    GEOS' negative polygon buffer constructs the inward parallel curve. Round
+    joins are required only at re-entrant vertices; convex corners naturally
+    remain intersections of their two translated faces.
+    """
+
+    if distance == 0.0:
+        return points.copy(), 0.0
+    original = Polygon(points[:-1])
+    offset_geometry = original.buffer(
+        -distance,
+        quad_segs=CLEARANCE_BUFFER_QUADRANT_SEGMENTS,
+        join_style="round",
+    )
+    parts = _polygon_parts(offset_geometry)
+    if not parts:
+        raise RuntimeError(
+            f"Global clearance removed the complete {label} gear body; "
+            "request a smaller clearance"
+        )
+    if len(parts) != 1:
+        raise RuntimeError(
+            f"Global clearance split the {label} gear into {len(parts)} bodies; "
+            "request a smaller clearance"
+        )
+    offset = parts[0]
+    if not offset.is_valid or offset.interiors:
+        raise RuntimeError(
+            f"Global clearance introduced invalid topology in the {label} gear"
+        )
+    area_tolerance = OVERLAP_AREA_TOLERANCE_FACTOR * module**2
+    if (
+        offset.area >= original.area
+        or offset.difference(original).area > area_tolerance
+    ):
+        raise RuntimeError(
+            f"Global clearance did not produce a strict inward offset of the "
+            f"{label} gear"
+        )
+    tolerance = _length_tolerance(module, GEOMETRY_LENGTH_TOLERANCE_FACTOR)
+    outline = _outline(offset, tolerance)
+    delivered = Polygon(outline[:-1])
+    if not delivered.is_valid or delivered.interiors:
+        raise RuntimeError(
+            f"Global clearance introduced a boundary artifact in the {label} gear"
+        )
+    minimum_offset = float(original.boundary.distance(delivered.boundary))
+    chord_tolerance = _length_tolerance(module, ANALYTIC_CHORD_TOLERANCE_FACTOR)
+    if minimum_offset + chord_tolerance < distance:
+        raise RuntimeError(
+            f"Global clearance face offset on the {label} gear fell below the "
+            f"requested distance ({minimum_offset:.9g} < {distance:.9g})"
+        )
+    return outline, minimum_offset
+
+
 def _transform_outline(
     points: FloatArray,
     angle: float,
@@ -623,6 +690,8 @@ def load_engine_config(
     addendum_factor: float,
     dedendum_factor: float,
     fillet_factor: float,
+    clearance: float,
+    max_backlash_deg: float | None,
     domain_start: float,
     domain_end: float,
     active_start: float,
@@ -665,6 +734,8 @@ def load_engine_config(
         input_mode=input_mode,
         samples=samples,
         reference_center_distance=reference_center_distance,
+        clearance=clearance,
+        max_backlash_deg=max_backlash_deg,
     )
 
 
@@ -833,6 +904,7 @@ class _GearGenerator:
             self.dedendum - self.fillet_radius * (1.0 - math.sin(self.alpha))
         )
         self._measure_centrodes()
+        self._resolve_clearance()
 
     def _psi(self, phi: float | FloatArray, derivative: int = 0) -> float | FloatArray:
         return self.motion(phi, derivative)
@@ -853,6 +925,15 @@ class _GearGenerator:
             and self.fillet_radius >= 0.0
         ):
             raise ValueError("Invalid cutter dimensions")
+        if not math.isfinite(config.clearance) or config.clearance < 0.0:
+            raise ValueError("Clearance must be finite and nonnegative")
+        if config.max_backlash_deg is not None and (
+            not math.isfinite(config.max_backlash_deg)
+            or config.max_backlash_deg < 0.0
+        ):
+            raise ValueError("Maximum backlash must be finite and nonnegative")
+        if config.clearance != 0.0 and config.max_backlash_deg is not None:
+            raise ValueError("Clearance and maximum backlash are mutually exclusive")
         pitch = math.pi * config.module
         minimum_tip_half_width = RACK_MIN_TIP_THICKNESS_FACTOR * config.module
         if (
@@ -1001,6 +1082,58 @@ class _GearGenerator:
             self.maximum_drive_curvature <= curvature_tolerance
             and self.minimum_driven_curvature >= -curvature_tolerance
         )
+
+    def _resolve_clearance(self) -> None:
+        """Resolve a per-face offset and the driven gear's backlash range."""
+
+        interval_count = _analysis_interval_count(len(self.config.samples))
+        phi = np.linspace(self.active_start, self.active_end, interval_count + 1)
+        driven_radius = np.asarray(self._driven_radius(phi), dtype=float)
+        self.minimum_driven_pitch_radius = float(np.min(driven_radius))
+        self.maximum_driven_pitch_radius = float(np.max(driven_radius))
+        pressure_factor = math.cos(self.alpha)
+        requested_maximum = self.config.max_backlash_deg
+        if requested_maximum is None:
+            self.clearance_mode = (
+                "module_normalized" if self.config.clearance > 0.0 else "none"
+            )
+            self.clearance_distance = self.config.clearance * self.config.module
+        else:
+            self.clearance_mode = "maximum_backlash"
+            self.clearance_distance = (
+                0.25
+                * math.radians(requested_maximum)
+                * self.minimum_driven_pitch_radius
+                * pressure_factor
+            )
+        self.clearance_module_fraction = (
+            self.clearance_distance / self.config.module
+        )
+        self.minimum_backlash_deg = math.degrees(
+            4.0
+            * self.clearance_distance
+            / (self.maximum_driven_pitch_radius * pressure_factor)
+        )
+        self.maximum_backlash_deg = math.degrees(
+            4.0
+            * self.clearance_distance
+            / (self.minimum_driven_pitch_radius * pressure_factor)
+        )
+        self.preclearance_minimum_tip_thickness = (
+            0.5 * math.pi * self.config.module
+            - 2.0 * self.addendum * math.tan(self.alpha)
+        )
+        self.minimum_tip_thickness = (
+            self.preclearance_minimum_tip_thickness
+            - 2.0 * self.clearance_distance / pressure_factor
+        )
+        if self.minimum_tip_thickness <= _length_tolerance(
+            self.config.module, GEOMETRY_LENGTH_TOLERANCE_FACTOR
+        ):
+            raise ValueError(
+                "Requested clearance would remove the minimum tooth-tip "
+                "thickness; request a smaller clearance"
+            )
 
     def _support_radius(self, pitch_radius_factor: float) -> float:
         """Choose a connected backing radius without consuming the pitch body."""
@@ -3195,9 +3328,11 @@ class _GearGenerator:
         )
         return float(placed_drive.intersection(placed_driven).area)
 
-    def _verify_pair(
+    def _sample_pair_overlap(
         self, drive: FloatArray, driven: FloatArray
-    ) -> tuple[float, float, int]:
+    ) -> tuple[float, int]:
+        """Return maximum overlap on the standard staggered phase grids."""
+
         phase_count = (
             max(
                 VERIFICATION_MIN_CLOSED_PHASES,
@@ -3241,7 +3376,16 @@ class _GearGenerator:
             max_workers=min(_MAX_GEOMETRY_WORKERS, len(fractions))
         ) as executor:
             overlaps = list(executor.map(phase_overlap, fractions))
-        maximum_overlap = max(overlaps)
+        return max(overlaps), len(fractions)
+
+    def _verify_pair(
+        self, drive: FloatArray, driven: FloatArray
+    ) -> tuple[float, float, int]:
+        maximum_overlap, verification_phase_count = self._sample_pair_overlap(
+            drive, driven
+        )
+        psi_start = float(self._psi(self.active_start))
+        placed_drive = Polygon(drive[:-1])
         overlap_tolerance = self._overlap_area_tolerance()
         if maximum_overlap > overlap_tolerance:
             raise RuntimeError(
@@ -3340,7 +3484,7 @@ class _GearGenerator:
             contact_deltas = list(
                 executor.map(recover_contact_delta, range(recovery_count))
             )
-        return maximum_overlap, max(contact_deltas), len(fractions)
+        return maximum_overlap, max(contact_deltas), verification_phase_count
 
     def _drive_centrode_outline_distance(self, drive: FloatArray) -> float | None:
         if not self.closed:
@@ -3624,9 +3768,61 @@ class _GearGenerator:
                     f"(outline area {outline_area:.9g}, drive-centrode enclosed "
                     f"area {pitch_area:.9g})"
                 )
-        maximum_overlap, transmission_error, verification_phases = self._verify_pair(
-            drive, driven
+        # Contact and protected-profile verification belong to the conjugate,
+        # zero-clearance geometry. A deliberate face offset removes contact at
+        # the nominal pose, so only artifact and interference checks are valid
+        # after this point.
+        (
+            preclearance_maximum_overlap,
+            transmission_error,
+            contact_verification_phases,
+        ) = self._verify_pair(drive, driven)
+        preclearance_drive_area = _signed_area(drive)
+        preclearance_driven_area = _signed_area(driven)
+        preclearance_minimum_root_radius = float(
+            min(
+                np.min(np.linalg.norm(drive[:-1], axis=1)),
+                np.min(np.linalg.norm(driven[:-1], axis=1)),
+            )
         )
+        drive_minimum_face_offset = 0.0
+        driven_minimum_face_offset = 0.0
+        if self.clearance_distance > 0.0:
+            drive, drive_minimum_face_offset = _offset_outline_normal(
+                drive,
+                self.clearance_distance,
+                label="drive",
+                module=self.config.module,
+            )
+            driven, driven_minimum_face_offset = _offset_outline_normal(
+                driven,
+                self.clearance_distance,
+                label="driven",
+                module=self.config.module,
+            )
+            _verify_single_connected_outline(
+                drive,
+                label="drive",
+                tolerance=outline_connectivity_tolerance,
+            )
+            _verify_single_connected_outline(
+                driven,
+                label="driven",
+                tolerance=outline_connectivity_tolerance,
+            )
+            maximum_overlap, verification_phases = self._sample_pair_overlap(
+                drive, driven
+            )
+            overlap_tolerance = self._overlap_area_tolerance()
+            if maximum_overlap > overlap_tolerance:
+                raise RuntimeError(
+                    "Global clearance introduced assembled-pair overlap area "
+                    f"{maximum_overlap:.9g} above tolerance "
+                    f"{overlap_tolerance:.9g}"
+                )
+        else:
+            maximum_overlap = preclearance_maximum_overlap
+            verification_phases = contact_verification_phases
         drive_radii = np.linalg.norm(drive[:-1], axis=1)
         driven_radii = np.linalg.norm(driven[:-1], axis=1)
         minimum_root_radius = float(min(np.min(drive_radii), np.min(driven_radii)))
@@ -3664,11 +3860,35 @@ class _GearGenerator:
             "outline_connectivity_tolerance": outline_connectivity_tolerance,
             "drive_outline_is_single_closed_loop": True,
             "driven_outline_is_single_closed_loop": True,
+            "preclearance_outline_connectivity_verified": True,
+            "postclearance_outline_connectivity_verified": True,
             "drive_teeth": self.drive_teeth,
             "driven_teeth": self.driven_teeth,
             "average_angular_ratio": self.average_ratio,
             "module": self.config.module,
             "pressure_angle_deg": self.config.pressure_angle_deg,
+            "clearance_mode": self.clearance_mode,
+            "clearance": self.clearance_module_fraction,
+            "clearance_module_fraction": self.clearance_module_fraction,
+            "clearance_distance": self.clearance_distance,
+            "clearance_offset_scope": "both_gear_faces_inward",
+            "clearance_offset_method": "constant_normal_polygon_erosion",
+            "requested_max_backlash_deg": self.config.max_backlash_deg,
+            "minimum_backlash_deg": self.minimum_backlash_deg,
+            "maximum_backlash_deg": self.maximum_backlash_deg,
+            "backlash_definition": (
+                "total_driven_angular_free_play_between_opposing_flank_contacts"
+            ),
+            "backlash_estimation_method": (
+                "normal_clearance_over_sampled_driven_pitch_radius"
+            ),
+            "minimum_driven_pitch_radius": self.minimum_driven_pitch_radius,
+            "maximum_driven_pitch_radius": self.maximum_driven_pitch_radius,
+            "drive_minimum_face_offset": drive_minimum_face_offset,
+            "driven_minimum_face_offset": driven_minimum_face_offset,
+            "clearance_geometry_artifact_verification": (
+                "valid_single_loop_inward_solids_and_sampled_pair_interference"
+            ),
             "total_integral": self.total_integral,
             "center_distance": self.center_distance,
             "undercut_curvature_limit": self.curvature_limit,
@@ -3721,6 +3941,9 @@ class _GearGenerator:
             "rolling_nonworking_initial_overlap_area": rolling_initial_overlap,
             "rolling_nonworking_sampled_overlap_area": rolling_sampled_overlap,
             "rolling_nonworking_removed_area": rolling_removed_area,
+            "preclearance_placed_pair_overlap_area": (
+                preclearance_maximum_overlap
+            ),
             "placed_pair_overlap_area": maximum_overlap,
             "centrodes_are_convex": self.centrodes_are_convex,
             "maximum_drive_curvature": self.maximum_drive_curvature,
@@ -3745,12 +3968,23 @@ class _GearGenerator:
                 else "analytic_with_hybrid_opposing_cutter"
             ),
             "verification_phase_count": verification_phases,
+            "preclearance_contact_verification_phase_count": (
+                contact_verification_phases
+            ),
+            "contact_verification_stage": "preclearance",
             "maximum_transmission_error": transmission_error,
             "maximum_sliding_velocity_factor": (1.0 + maximum_ratio)
             * contact_distance_bound,
             "minimum_root_radius": minimum_root_radius,
-            "minimum_tip_thickness": 0.5 * math.pi * self.config.module
-            - 2.0 * self.addendum * math.tan(self.alpha),
+            "preclearance_minimum_root_radius": (
+                preclearance_minimum_root_radius
+            ),
+            "preclearance_minimum_tip_thickness": (
+                self.preclearance_minimum_tip_thickness
+            ),
+            "minimum_tip_thickness": self.minimum_tip_thickness,
+            "preclearance_drive_area": preclearance_drive_area,
+            "preclearance_driven_area": preclearance_driven_area,
             "drive_area": _signed_area(drive),
             "driven_area": _signed_area(driven),
         }
