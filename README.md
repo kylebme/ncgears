@@ -68,6 +68,11 @@ pair.export_dxf("two_lobe.dxf")
 pair.export_svg("two_lobe.svg")
 ```
 
+DXF outlines are simplified by default to a maximum deviation of `0.001`
+module from the full-resolution generated path. Override this in module units
+with `pair.export_dxf("two_lobe.dxf", max_error=0.0005)` or
+`--dxf-max-error 0.0005`; use zero to export every generated point.
+
 `module` and all exported coordinates use millimetres. The returned
 `GearPair` also provides:
 

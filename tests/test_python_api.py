@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 from ezdxf import units
 from ezdxf.addons.drawing import Frontend, RenderContext, recorder
+from shapely.geometry import LineString
 
 import ncgears
 from ncgears.cli import build_parser
@@ -45,6 +46,7 @@ def _fixture_pair(directory: Path) -> GearPair:
         "average_angular_ratio": 2.0,
         "center_distance": 12.5,
         "maximum_transmission_error": 1e-4,
+        "module": 1.0,
     }
     (directory / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
     return GearPair.load(directory)
@@ -133,6 +135,79 @@ def test_single_gear_dxf_centers_selected_gear_at_origin(
     assert tuple(points[0].dxf.location) == pytest.approx((0.0, 0.0, 0.0))
 
 
+def test_dxf_simplification_has_module_relative_error_bound(tmp_path: Path) -> None:
+    pair = _fixture_pair(tmp_path / "fixture")
+    angles = np.linspace(0.0, 2.0 * math.pi, 4097)
+    outline = np.column_stack((10.0 * np.cos(angles), 10.0 * np.sin(angles)))
+    pair = GearPair(
+        directory=pair.directory,
+        drive_outline=outline,
+        driven_outline=pair.driven_outline,
+        metadata={**pair.metadata, "module": 2.0},
+    )
+    max_error = 0.001
+
+    output = pair.export_dxf(
+        tmp_path / "simplified.dxf", gear="drive", max_error=max_error
+    )
+    document = ezdxf.readfile(output)
+    polyline = next(iter(document.modelspace().query("LWPOLYLINE")))
+    exported = np.asarray(polyline.get_points("xy"))
+    closed_export = np.vstack((exported, exported[0]))
+
+    assert len(exported) < len(outline) / 4
+    assert LineString(outline).hausdorff_distance(LineString(closed_export)) <= (
+        max_error * pair.metadata["module"]
+    )
+
+
+def test_dxf_simplification_resolution_scales_with_module(tmp_path: Path) -> None:
+    fixture = _fixture_pair(tmp_path / "fixture")
+    angles = np.linspace(0.0, 2.0 * math.pi, 2049)
+    normalized_outline = np.column_stack((np.cos(angles), np.sin(angles)))
+    exported_counts = []
+
+    for scale in (1.0, 10.0):
+        pair = GearPair(
+            directory=fixture.directory,
+            drive_outline=scale * normalized_outline,
+            driven_outline=fixture.driven_outline,
+            metadata={**fixture.metadata, "module": scale},
+        )
+        output = pair.export_dxf(tmp_path / f"scale-{scale:g}.dxf", gear="drive")
+        document = ezdxf.readfile(output)
+        polyline = next(iter(document.modelspace().query("LWPOLYLINE")))
+        exported_counts.append(len(polyline))
+
+    assert exported_counts[0] == exported_counts[1]
+
+
+def test_zero_dxf_max_error_retains_full_resolution_outline(tmp_path: Path) -> None:
+    pair = _fixture_pair(tmp_path / "fixture")
+    angles = np.linspace(0.0, 2.0 * math.pi, 257)
+    outline = np.column_stack((np.cos(angles), np.sin(angles)))
+    pair = GearPair(
+        directory=pair.directory,
+        drive_outline=outline,
+        driven_outline=pair.driven_outline,
+        metadata=pair.metadata,
+    )
+
+    output = pair.export_dxf(tmp_path / "full.dxf", gear="drive", max_error=0.0)
+    document = ezdxf.readfile(output)
+    exported = next(iter(document.modelspace().query("LWPOLYLINE")))
+
+    assert len(exported) == len(outline) - 1
+
+
+@pytest.mark.parametrize("max_error", [-0.001, math.inf, math.nan])
+def test_invalid_dxf_max_error_is_rejected(max_error: float, tmp_path: Path) -> None:
+    pair = _fixture_pair(tmp_path / "fixture")
+
+    with pytest.raises(ValueError, match="max_error"):
+        pair.export_dxf(tmp_path / "invalid.dxf", max_error=max_error)
+
+
 def test_result_renders_animated_gif(tmp_path: Path) -> None:
     pytest.importorskip("matplotlib")
     pillow = pytest.importorskip("PIL.Image")
@@ -210,6 +285,14 @@ def test_cli_accepts_interactive_plot_option() -> None:
     args = build_parser().parse_args(["phi", "--plot"])
 
     assert args.plot is True
+
+
+def test_cli_accepts_module_relative_dxf_error() -> None:
+    args = build_parser().parse_args(
+        ["phi", "--dxf", "pair.dxf", "--dxf-max-error", "0.0025"]
+    )
+
+    assert args.dxf_max_error == pytest.approx(0.0025)
 
 
 def test_cli_accepts_clearance_or_maximum_backlash() -> None:

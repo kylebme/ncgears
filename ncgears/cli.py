@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 
 from ._policy import (
+    DEFAULT_DXF_MAX_ERROR_MODULES,
     DEFAULT_GIF_FPS,
     DEFAULT_GIF_FRAMES,
     DEFAULT_INPUT_SAMPLES,
@@ -91,6 +92,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gif-fps", type=int, default=DEFAULT_GIF_FPS)
     parser.add_argument("--svg", type=Path, help="also export an assembled SVG")
     parser.add_argument("--dxf", type=Path, help="also export an assembled DXF")
+    parser.add_argument(
+        "--dxf-max-error",
+        type=float,
+        default=DEFAULT_DXF_MAX_ERROR_MODULES,
+        metavar="MODULES",
+        help="maximum DXF outline deviation in module units",
+    )
     return parser
 
 
@@ -129,7 +137,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.svg:
             pair.export_svg(args.svg)
         if args.dxf:
-            pair.export_dxf(args.dxf)
+            pair.export_dxf(args.dxf, max_error=args.dxf_max_error)
         if args.gif:
             pair.render_gif(
                 None if args.gif is True else args.gif,

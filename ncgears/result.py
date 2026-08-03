@@ -13,11 +13,13 @@ import ezdxf
 import numpy as np
 from ezdxf import colors, units
 from numpy.typing import NDArray
+from shapely.geometry import Polygon
 
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
 
 from ._policy import (
+    DEFAULT_DXF_MAX_ERROR_MODULES,
     DEFAULT_GIF_DPI,
     DEFAULT_GIF_FPS,
     DEFAULT_GIF_FRAMES,
@@ -233,13 +235,23 @@ class GearPair:
         output: str | Path,
         *,
         gear: GearSelection = "pair",
+        max_error: float = DEFAULT_DXF_MAX_ERROR_MODULES,
     ) -> Path:
         """Export one outline or the assembled pair as an ASCII DXF.
 
         The document uses millimetres and one closed lightweight polyline per
-        gear. Pair exports place each outline on its own named layer.
+        gear. Pair exports place each outline on its own named layer. Before
+        export, each outline is simplified with a maximum geometric
+        displacement of ``max_error * module``. Set ``max_error=0`` to retain
+        every point in the full-resolution outline.
         """
 
+        if not math.isfinite(max_error) or max_error < 0.0:
+            raise ValueError("max_error must be a finite, non-negative value")
+        module = float(self.metadata["module"])
+        if not math.isfinite(module) or module <= 0.0:
+            raise ValueError("metadata module must be a finite, positive value")
+        tolerance = max_error * module
         outlines = self._selected_outlines(gear)
         path = Path(output).expanduser()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -256,6 +268,10 @@ class GearPair:
 
         for label, points in outlines.items():
             vertices = points
+            if tolerance > 0.0:
+                polygon = Polygon(vertices)
+                simplified = polygon.simplify(tolerance, preserve_topology=True)
+                vertices = np.asarray(simplified.exterior.coords, dtype=float)
             if len(vertices) > 1 and np.allclose(vertices[0], vertices[-1]):
                 vertices = vertices[:-1]
             layer = label.upper()
