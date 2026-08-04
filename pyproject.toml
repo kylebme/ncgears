@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ncgears"
-version = "0.3.0"
+version = "0.3.1"
 description = "Generate noncircular gears with Python"
 readme = "README.md"
 requires-python = ">=3.10"
