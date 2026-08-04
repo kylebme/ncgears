@@ -64,6 +64,11 @@ quarter-pitch padding at both ends, are adaptively tessellated, closed, and
 subtracted from the target's analytic root region. This avoids repeated Boolean
 intersection and union of complete gear solids.
 
+Before final subtraction, the raw trajectory cut clips each protected flank to
+the exposed component connected to its addendum tip. A one-sided material guard
+then retains that component up to its cutter intersection. This avoids the
+doubled-back root slivers that a symmetric buffered-flank guard would leave.
+
 The analytic rounded rack-tip fillet remains the preferred closure. When it
 cannot join a cusp-free flank component, a sacrificial connection closes the
 initial stock and an opposing addendum-vertex curve generates the non-working

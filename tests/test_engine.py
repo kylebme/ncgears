@@ -106,11 +106,13 @@ def _assert_verified_pair(pair: ncgears.GearPair) -> None:
         "intersected_analytic_root_regions"
     )
     assert pair.metadata["cutter_undercut_vertices_per_addendum"] == 2
+    assert pair.metadata["cutter_undercut_clipped_flank_count"] >= 0
     curve_count = pair.metadata["cutter_undercut_curve_count"]
     assert curve_count >= pair.metadata["hybrid_undercut_count"]
     if curve_count == 0:
         assert pair.metadata["cutter_undercut_curve_sample_count"] == 0
         assert pair.metadata["cutter_undercut_removed_area"] == pytest.approx(0.0)
+        assert pair.metadata["cutter_undercut_clipped_flank_count"] == 0
     else:
         assert pair.metadata["cutter_undercut_curve_sample_count"] >= (
             curve_count * MIN_CLOSURE_CURVE_SAMPLES
@@ -618,3 +620,36 @@ def test_nonconvex_cusps_use_addendum_vertex_curve_undercuts(
     # scallops left by unions of many discrete solid-cutter poses.
     assert _severe_boundary_reversal_count(pair.drive_outline) < 200
     assert _severe_boundary_reversal_count(pair.driven_outline) < 200
+
+
+def test_cutter_undercut_does_not_leave_root_side_flank_slivers(
+    tmp_path: Path,
+) -> None:
+    pair = ncgears.generate_from_centrode(
+        "1 + 0.22*sin(phi) + 0.15*cos(2*phi) - 0.05*sin(3*phi)",
+        name="cutter_undercut_flank_sliver",
+        teeth=64,
+        output_directory=tmp_path,
+    )
+
+    _assert_verified_pair(pair)
+    assert pair.metadata["analytic_undercut_count"] == 3
+    assert pair.metadata["cutter_undercut_curve_count"] == 6
+    assert pair.metadata["cutter_undercut_clipped_flank_count"] == 3
+
+    # This window is the visible failure reported for the assembled driven
+    # gear. The old symmetric flank guard doubled back by 2.84 radians here,
+    # leaving a narrow material sliver between the flank and cutter curve.
+    placed_driven = pair.placed_driven_outline
+    edges = np.diff(placed_driven[:, 0] + 1j * placed_driven[:, 1])
+    directions = edges / np.abs(edges)
+    turns = np.angle(directions[1:] / directions[:-1])
+    vertices = placed_driven[1:-1]
+    reported_window = (
+        (vertices[:, 0] > 49.56)
+        & (vertices[:, 0] < 49.63)
+        & (vertices[:, 1] > 42.62)
+        & (vertices[:, 1] < 42.78)
+    )
+    assert np.any(reported_window)
+    assert np.max(np.abs(turns[reported_window])) < 1.0

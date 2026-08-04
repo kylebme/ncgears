@@ -152,7 +152,12 @@ UNDERCUT_VERTEX_BOOLEAN_CLEARANCE_FACTOR = ANALYTIC_CHORD_TOLERANCE_FACTOR
 # those are contact tessellation noise, not cutter-required penetration.
 UNDERCUT_VERTEX_MIN_PENETRATION_FACTOR = ANALYTIC_CHORD_TOLERANCE_FACTOR
 OPEN_UNDERCUT_VERTEX_CUT_HALF_WIDTH_FACTOR = 0.08
-UNDERCUT_PROTECTED_FLANK_GUARD_FACTOR = (
+# Determine which side of a retained flank contains its tooth material with a
+# shallow probe, then protect that side beyond the Boolean-clearance budget.
+# A one-sided guard meets the exact flank instead of leaving the narrow capsule
+# end caps produced by a symmetric line buffer.
+UNDERCUT_PROTECTED_FLANK_SIDE_PROBE_FACTOR = 1e-3
+UNDERCUT_PROTECTED_FLANK_GUARD_DEPTH_FACTOR = (
     2.0 * ANALYTIC_CHORD_TOLERANCE_FACTOR
 )
 UNDERCUT_GUARD_BUFFER_QUADRANT_SEGMENTS = 2

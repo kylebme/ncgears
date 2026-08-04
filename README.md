@@ -172,7 +172,9 @@ When a cutter-generated root is needed, the engine traces the two addendum
 vertices of each opposing tooth instead of intersecting complete gear solids at
 hundreds of discrete poses. Penetrating trajectory spans are extended beyond
 their stock intersections, adaptively tessellated, closed, and subtracted only
-inside analytic root regions. Exact regular flank spans remain guarded.
+inside analytic root regions. After the raw cut, only the exposed flank segment
+connected to each addendum tip remains guarded, so a crossed root-side segment
+cannot survive as a narrow material sliver.
 Finite open profiles clip each analytical curve in rolling-arc parameter space,
 then follow one quarter of the centrode back across the inner boundary.
 Source-domain padding is used only to solve endpoint teeth; it cannot change or

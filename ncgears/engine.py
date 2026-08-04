@@ -118,7 +118,8 @@ from ._policy import (
     TOOTH_COUNT_ABS_TOLERANCE,
     UNDERCUT_FLANK_SEARCH_PITCHES,
     UNDERCUT_GUARD_BUFFER_QUADRANT_SEGMENTS,
-    UNDERCUT_PROTECTED_FLANK_GUARD_FACTOR,
+    UNDERCUT_PROTECTED_FLANK_GUARD_DEPTH_FACTOR,
+    UNDERCUT_PROTECTED_FLANK_SIDE_PROBE_FACTOR,
     UNDERCUT_VERTEX_BOOLEAN_CLEARANCE_FACTOR,
     UNDERCUT_VERTEX_CHORD_TOLERANCE_FACTOR,
     UNDERCUT_VERTEX_INTERSECTION_SAMPLES,
@@ -2742,11 +2743,15 @@ class _GearGenerator:
         spans: tuple[_ProtectedFlankSpan, ...],
         target: Geometry,
     ) -> Geometry:
-        """Keep curve-based root cuts off retained analytic flank spans."""
+        """Protect the tooth-material side of retained analytic flanks."""
 
-        width = _length_tolerance(
+        probe_width = _length_tolerance(
             self.config.module,
-            UNDERCUT_PROTECTED_FLANK_GUARD_FACTOR,
+            UNDERCUT_PROTECTED_FLANK_SIDE_PROBE_FACTOR,
+        )
+        guard_depth = _length_tolerance(
+            self.config.module,
+            UNDERCUT_PROTECTED_FLANK_GUARD_DEPTH_FACTOR,
         )
         guards: list[Geometry] = []
         for span in spans:
@@ -2761,9 +2766,33 @@ class _GearGenerator:
                 sign=span.sign,
                 common_arc=common_arc,
             )
+            flank = LineString(np.column_stack((points.real, points.imag)))
+            left_probe = flank.buffer(
+                probe_width,
+                single_sided=True,
+                cap_style="flat",
+                join_style="mitre",
+                quad_segs=UNDERCUT_GUARD_BUFFER_QUADRANT_SEGMENTS,
+            )
+            right_probe = flank.buffer(
+                -probe_width,
+                single_sided=True,
+                cap_style="flat",
+                join_style="mitre",
+                quad_segs=UNDERCUT_GUARD_BUFFER_QUADRANT_SEGMENTS,
+            )
+            signed_depth = (
+                guard_depth
+                if left_probe.intersection(target).area
+                >= right_probe.intersection(target).area
+                else -guard_depth
+            )
             guards.append(
-                LineString(np.column_stack((points.real, points.imag))).buffer(
-                    width,
+                flank.buffer(
+                    signed_depth,
+                    single_sided=True,
+                    cap_style="flat",
+                    join_style="mitre",
                     quad_segs=UNDERCUT_GUARD_BUFFER_QUADRANT_SEGMENTS,
                 )
             )
@@ -3299,15 +3328,9 @@ class _GearGenerator:
             False: drive_result.root_trim_zone,
             True: driven_result.root_trim_zone,
         }
-        protected_guards = {
-            False: self._protected_flank_guard(
-                drive_result.protected_flanks,
-                targets[False],
-            ),
-            True: self._protected_flank_guard(
-                driven_result.protected_flanks,
-                targets[True],
-            ),
+        analytic_results = {
+            False: drive_result,
+            True: driven_result,
         }
         cuts: dict[bool, list[Geometry]] = {False: [], True: []}
         total_curve_samples = 0
@@ -3360,7 +3383,6 @@ class _GearGenerator:
             cut = (
                 closed_curve.intersection(trim_zones[target_driven])
                 .intersection(targets[target_driven])
-                .difference(protected_guards[target_driven])
             )
             if cut.area <= 0.0:
                 member = "driven" if target_driven else "drive"
@@ -3381,12 +3403,34 @@ class _GearGenerator:
             if not member_cuts:
                 continue
             before = targets[target_driven]
-            after = _normalize_polygon_precision(
-                before.difference(union_all(member_cuts)),
-                _length_tolerance(
-                    self.config.module,
-                    OUTLINE_CONNECTIVITY_TOLERANCE_FACTOR,
+            raw_cut = union_all(member_cuts)
+            result = analytic_results[target_driven]
+            precision = _length_tolerance(
+                self.config.module,
+                OUTLINE_CONNECTIVITY_TOLERANCE_FACTOR,
+            )
+            raw_after = _normalize_polygon_precision(
+                before.difference(raw_cut),
+                precision,
+            )
+            exposed_flanks, _ = self._clip_protected_flanks_to_boundary(
+                result.protected_flanks,
+                _outline(
+                    raw_after,
+                    _length_tolerance(
+                        self.config.module,
+                        GEOMETRY_LENGTH_TOLERANCE_FACTOR,
+                    ),
                 ),
+                chord_error=result.maximum_chord_error,
+            )
+            protected_guard = self._protected_flank_guard(
+                exposed_flanks,
+                before,
+            )
+            after = _normalize_polygon_precision(
+                before.difference(raw_cut.difference(protected_guard)),
+                precision,
             )
             total_removed_area += float(before.area - after.area)
             targets[target_driven] = after
@@ -3756,6 +3800,31 @@ class _GearGenerator:
             label="driven",
             tolerance=outline_connectivity_tolerance,
         )
+        cutter_drive_clipped_flank_count = 0
+        cutter_driven_clipped_flank_count = 0
+        if undercut_curve_count > 0:
+            drive_protected_flanks, cutter_drive_clipped_flank_count = (
+                self._clip_protected_flanks_to_boundary(
+                    drive_result.protected_flanks,
+                    drive,
+                    chord_error=drive_result.maximum_chord_error,
+                )
+            )
+            driven_protected_flanks, cutter_driven_clipped_flank_count = (
+                self._clip_protected_flanks_to_boundary(
+                    driven_result.protected_flanks,
+                    driven,
+                    chord_error=driven_result.maximum_chord_error,
+                )
+            )
+            drive_result = replace(
+                drive_result,
+                protected_flanks=drive_protected_flanks,
+            )
+            driven_result = replace(
+                driven_result,
+                protected_flanks=driven_protected_flanks,
+            )
         posttrim_drive_flank_error, posttrim_drive_regular_factor = (
             self._verify_protected_flanks(
                 drive_result.protected_flanks,
@@ -3987,6 +4056,10 @@ class _GearGenerator:
                 len(drive_result.protected_flanks) + len(driven_result.protected_flanks)
             ),
             "boundary_clipped_flank_count": boundary_clipped_flank_count,
+            "cutter_undercut_clipped_flank_count": (
+                cutter_drive_clipped_flank_count
+                + cutter_driven_clipped_flank_count
+            ),
             "minimum_flank_regular_factor": minimum_flank_regular_factor,
             "maximum_protected_flank_boundary_error": (
                 maximum_protected_flank_boundary_error
