@@ -168,11 +168,11 @@ Every input uses the hybrid analytical involute engine. It evaluates the
 straight-rack flank and rounded rack-tip envelope equations without constructing
 or sweeping a complete rack solid, so remote rack material cannot erase a
 pitch-curve concavity. Exact addendum and dedendum offsets complete each tooth.
-An independent rolling pass uses each opposing gear as a cutter to remove
-measured root interference. Exact regular flank spans, addendum geometry, and
-the connected support cores are guarded. The eligible root region combines
-pitch-side material with analytic fillet/dedendum closures, so nonconvex cusp
-stock outside the pitch curve can be removed without reshaping a tooth tip.
+When a cutter-generated root is needed, the engine traces the two addendum
+vertices of each opposing tooth instead of intersecting complete gear solids at
+hundreds of discrete poses. Penetrating trajectory spans are extended beyond
+their stock intersections, adaptively tessellated, closed, and subtracted only
+inside analytic root regions. Exact regular flank spans remain guarded.
 Finite open profiles clip each analytical curve in rolling-arc parameter space,
 then follow one quarter of the centrode back across the inner boundary.
 Source-domain padding is used only to solve endpoint teeth; it cannot change or
@@ -214,7 +214,7 @@ intersection. A successful result includes checks for:
 - contact motion recovered from the finished outlines
 - analytic envelope/tangency, intersection, join, and chord residuals
 - cusp-free, exposed protected flanks with sampled conjugate contact coverage
-- iterative opposing-gear undercut generation confined to analytic root regions
+- smooth addendum-vertex undercut curves confined to analytic root regions
 - root radius, tip thickness, and centrode curvature
 - drive-outline fidelity to the requested centrode
 - sliding-velocity and undercut diagnostics
@@ -222,7 +222,7 @@ intersection. A successful result includes checks for:
 `metadata.json` reports
 `generation_backend: "hybrid_analytic_involute"`, flank sample count, maximum
 envelope residual, maximum envelope-tangency residual, chord error, protected
-flank diagnostics, outline-connectivity status, and iterative rolling-cut
+flank diagnostics, outline-connectivity status, and addendum-vertex cutter
 diagnostics. Pair verification uses a bounded thread pool of at most eight
 workers.
 

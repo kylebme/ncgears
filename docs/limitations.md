@@ -3,9 +3,9 @@
 `ncgears` has one tooth-geometry engine: hybrid analytical involute
 construction. It evaluates generalized-involute working flanks, rounded
 rack-tip fillet envelopes, and addendum/dedendum offsets directly. Shapely/GEOS
-arranges those curves into solids, and a rolling-pair pass removes interference
-from any non-working tooth material. Exact regular flank spans and the connected
-support cores are protected from those cuts.
+arranges those curves into solids, and opposing addendum-vertex trajectories
+remove interference from eligible non-working root material. Exact regular
+flank spans are protected from those cuts.
 
 No complete rack solid is swept through the gear. This is important for
 nonconvex centrodes, where a remote part of a fictitious rack can cross a
@@ -54,39 +54,33 @@ All dimensional tolerances are factors of module defined in
 coordinate offsets, modules close to machine precision, or extremely thin
 remnants remain unsuitable inputs.
 
-## Rolling root generation and verification
+## Cutter-curve root generation and verification
 
-Root undercuts and other non-working interference are resolved by running the
-finished analytical pair through the requested motion, using each opposing gear
-as a root cutter. Cusp-free analytic spans that remain exposed on the arranged
-body, the addendum boundary, and the connected support core are protected by
-material guards. Eligible material is limited to an analytic root region:
-pitch-side material plus fillet/dedendum closures that capture nonconvex cusp
-stock outside the pitch curve. An overlap that cannot be removed inside that
-region is rejected rather than resolved by reshaping a finished flank or tip.
+Root undercuts and other eligible non-working interference are generated from
+the trajectories of the two vertices on every opposing addendum. A point-only
+search identifies trajectory intervals that penetrate the initial stock.
+Intervals below the analytic chord-error budget are ignored; the others receive
+quarter-pitch padding at both ends, are adaptively tessellated, closed, and
+subtracted from the target's analytic root region. This avoids repeated Boolean
+intersection and union of complete gear solids.
 
 The analytic rounded rack-tip fillet remains the preferred closure. When it
 cannot join a cusp-free flank component, a sacrificial connection closes the
-initial stock and the opposing-gear pass generates the non-working undercut.
-Metadata distinguishes these cases with `hybrid_undercut_count` and
-`fillet_closure_mode`.
+initial stock and an opposing addendum-vertex curve generates the non-working
+undercut. Metadata distinguishes these cases with `hybrid_undercut_count`,
+`cutter_undercut_curve_count`, and `fillet_closure_mode`.
 
-For closed gears the rolling cutter repeats four staggered phase grids until
-sampled removed area converges. A hybrid undercut uses at least 24 poses per
-tooth on each grid, the same per-grid floor as the v0.2.1 Boolean generator;
-`samples_per_radian` can raise that floor further. The accumulated cuts are
-morphologically closed over 0.00175 module, then unioned with the original
-exact cuts before subtraction. This fills narrow pose-to-pose scallops without
-adding global backlash or extending removal outside the analytic root region.
-Short GEOS overlay edges that reverse direction are also removed below the
-analytic chord-error budget. An open profile receives one four-grid sweep.
+Finished cutter trajectories use a chord-error target of 0.0000025 module and
+are precision-normalized after subtraction. Finite open profiles search one
+circular pitch beyond each requested endpoint using the already-required source
+padding. Their open-ended cutter curves use a narrow local strip so endpoint
+root interference is removed without reconstructing a complete cutter solid.
 
-Protected contact coverage is checked on the same staggered grid, and several
-off-grid phases additionally recover the first solid-contact angle on both
-sides of the requested pose. This catches grid-aligned errors, but it is a
-dense sampled verification rather than a formal interval-arithmetic proof over
-every real-valued phase. Metadata records the base and effective phase counts,
-maximum angular step, and cut-closing distance.
+After the curve cuts, protected contact coverage and whole-solid interference
+are checked on four staggered grids. Several off-grid phases additionally
+recover the first solid-contact angle on both sides of the requested pose. This
+catches grid-aligned errors, but it remains dense sampled verification rather
+than formal interval arithmetic over every real-valued phase.
 
 Increase `samples_per_radian` when:
 

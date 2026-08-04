@@ -2,7 +2,7 @@
 
 Generalized involute flanks and rounded rack-tip fillets are evaluated from
 their analytical envelopes. Shapely/GEOS supplies curve arrangement and
-non-working-profile rolling interference removal.
+closed addendum-vertex undercut subtraction.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from scipy.optimize import brentq, least_squares, minimize_scalar
 from scipy.spatial import cKDTree
 from shapely import (
     Geometry,
-    affinity,
+    contains_xy,
     line_merge,
     linestrings,
     make_valid,
@@ -67,7 +67,6 @@ from ._policy import (
     FLOAT_COMPARISON_ULPS,
     GEOMETRY_LENGTH_TOLERANCE_FACTOR,
     HYBRID_CUSP_CLEARANCE_FACTOR,
-    HYBRID_ROLLING_PHASES_PER_TOOTH,
     INTEGRATION_INTERVAL_COUNT,
     INTERSECTION_CANDIDATE_OFFSET_WEIGHT,
     INTERSECTION_CONTACT_EXCLUSION_PITCHES,
@@ -97,7 +96,8 @@ from ._policy import (
     MIN_TEETH,
     MINIMUM_PITCH_AREA_FRACTION,
     OPEN_ANALYTIC_BACKING_RADIUS_PITCH_FACTOR,
-    OUTLINE_BACKTRACK_TOLERANCE_MULTIPLIER,
+    OPEN_UNDERCUT_VERTEX_CUT_HALF_WIDTH_FACTOR,
+    OPEN_UNDERCUT_VERTEX_SEARCH_PADDING_PITCHES,
     OUTLINE_COLLINEAR_TOLERANCE_FRACTION,
     OUTLINE_CONNECTIVITY_TOLERANCE_FACTOR,
     OUTLINE_DUPLICATE_TOLERANCE_FRACTION,
@@ -109,26 +109,26 @@ from ._policy import (
     PITCH_MASK_BUFFER_QUADRANT_SEGMENTS,
     PITCH_MASK_SUPPORT_RADIUS_PITCH_FACTOR,
     PROTECTED_CONTACT_RESIDUAL_FACTOR,
-    PROTECTED_FLANK_GUARD_CHORD_FACTORS,
     RACK_MIN_TIP_THICKNESS_FACTOR,
-    ROLLING_CONVERGENCE_AREA_FACTOR,
-    ROLLING_CUT_BUFFER_QUADRANT_SEGMENTS,
-    ROLLING_CUT_CLOSING_FACTOR,
-    ROLLING_MAX_PASSES,
-    ROLLING_MIN_PHASES,
-    ROLLING_PHASES_PER_TOOTH,
-    ROLLING_STAGGER_OFFSETS,
     ROOT_CURVE_SAMPLES_PER_TOOTH,
     ROOT_SUPPORT_RADIUS_PITCH_FACTOR,
     SLIDING_SINE_FLOOR,
     SUPPORT_BUFFER_QUADRANT_SEGMENTS,
     TABULAR_ARRAY_DIMENSIONS,
     TOOTH_COUNT_ABS_TOLERANCE,
-    TRIM_BUFFER_QUADRANT_SEGMENTS,
     UNDERCUT_FLANK_SEARCH_PITCHES,
+    UNDERCUT_GUARD_BUFFER_QUADRANT_SEGMENTS,
+    UNDERCUT_PROTECTED_FLANK_GUARD_FACTOR,
+    UNDERCUT_VERTEX_BOOLEAN_CLEARANCE_FACTOR,
+    UNDERCUT_VERTEX_CHORD_TOLERANCE_FACTOR,
+    UNDERCUT_VERTEX_INTERSECTION_SAMPLES,
+    UNDERCUT_VERTEX_MIN_PENETRATION_FACTOR,
+    UNDERCUT_VERTEX_SEARCH_SAMPLES_PER_TOOTH,
+    UNDERCUT_VERTEX_SWEEP_PADDING_PITCHES,
     VERIFICATION_MIN_CLOSED_PHASES,
     VERIFICATION_MIN_OPEN_PHASES,
     VERIFICATION_PHASES_PER_TOOTH,
+    VERIFICATION_STAGGER_OFFSETS,
 )
 
 FloatArray = NDArray[np.float64]
@@ -222,6 +222,12 @@ class _ProtectedFlankSpan:
 
 
 @dataclass(frozen=True)
+class _AddendumEdge:
+    minus_vertex: complex
+    plus_vertex: complex
+
+
+@dataclass(frozen=True)
 class _AnalyticGearResult:
     outline: FloatArray
     root_trim_zone: Geometry
@@ -238,6 +244,7 @@ class _AnalyticGearResult:
     undercut_count: int
     hybrid_undercut_count: int
     protected_flanks: tuple[_ProtectedFlankSpan, ...]
+    addendum_edges: tuple[_AddendumEdge, ...]
 
 
 class _QuinticSeries:
@@ -548,13 +555,10 @@ def _clean_polygon(geometry: Geometry) -> Polygon:
     return max(parts, key=lambda polygon: polygon.area)
 
 
-def _clean_polygon_at_precision(geometry: Geometry, precision: float) -> Polygon:
-    """Collapse sub-precision polygon features without retaining a GEOS grid."""
+def _normalize_polygon_precision(geometry: Geometry, precision: float) -> Polygon:
+    """Collapse sub-precision Boolean seams without retaining a GEOS grid."""
 
     snapped = set_precision(geometry, precision)
-    # Affine placement of a fixed-precision geometry can retain an unusable
-    # precision model in GEOS. Keep the snapped coordinates while restoring
-    # the double-precision model used by the rest of the engine.
     return _clean_polygon(set_precision(snapped, 0.0))
 
 
@@ -593,19 +597,7 @@ def _outline(polygon: Polygon, tolerance: float) -> FloatArray:
             & (lengths > 0.0)
             & (twice_area < tolerance * OUTLINE_COLLINEAR_TOLERANCE_FRACTION * lengths)
         )
-        # Overlay of many almost coincident cutter poses can leave a short
-        # edge that doubles back along the undercut before continuing. GEOS
-        # considers the resulting hairpin a valid exterior, so collinearity
-        # cleanup alone cannot remove it. Delete the vertex at the start of
-        # only those reversing edges whose length remains below the analytic
-        # chord-error budget.
-        outgoing_lengths = np.linalg.norm(outgoing, axis=1)
-        short_backtrack = (
-            ~forward
-            & (outgoing_lengths > 0.0)
-            & (outgoing_lengths <= tolerance * OUTLINE_BACKTRACK_TOLERANCE_MULTIPLIER)
-        )
-        removable = collinear | short_backtrack
+        removable = collinear
         changed = bool(np.any(removable))
         keep = ~removable
         points = points[keep]
@@ -1887,7 +1879,7 @@ class _GearGenerator:
                 # The rounded rack-tip branch cannot provide a regular
                 # transition.  Preserve only the tip-side regular component;
                 # the gap to the nominal fillet becomes sacrificial stock for
-                # the opposing-gear rolling cutter.
+                # the opposing addendum-vertex cutter.
                 singular_arc = min(
                     singular_arcs,
                     key=lambda singular: abs(singular - flank_tip_arc),
@@ -1943,6 +1935,7 @@ class _GearGenerator:
         samples_per_radian: int,
         *,
         minimum_samples: int,
+        chord_tolerance_factor: float = ANALYTIC_CHORD_TOLERANCE_FACTOR,
     ) -> tuple[NDArray[np.complex128], int, float]:
         endpoint_phi = self._phi_from_common_arc(np.asarray([start, end], dtype=float))
         phi_span = abs(float(endpoint_phi[1] - endpoint_phi[0]))
@@ -1953,7 +1946,7 @@ class _GearGenerator:
             ),
         )
         target_error = _length_tolerance(
-            self.config.module, ANALYTIC_CHORD_TOLERANCE_FACTOR
+            self.config.module, chord_tolerance_factor
         )
         while True:
             parameters = np.linspace(start, end, sample_count + 1)
@@ -2236,6 +2229,22 @@ class _GearGenerator:
             total_samples += count
             maximum_chord_error = max(maximum_chord_error, chord)
 
+        addendum_edges: list[_AddendumEdge] = []
+        for tooth in range(teeth):
+            tooth_phase = float(tooth) if self.closed else tooth + 0.5
+            if driven:
+                minus_vertex = flanks[tooth_phase + 1.0, -1][-1]
+                plus_vertex = flanks[tooth_phase, 1][-1]
+            else:
+                minus_vertex = flanks[tooth_phase, -1][-1]
+                plus_vertex = flanks[tooth_phase, 1][-1]
+            addendum_edges.append(
+                _AddendumEdge(
+                    minus_vertex=complex(minus_vertex),
+                    plus_vertex=complex(plus_vertex),
+                )
+            )
+
         if not self.closed:
             body_span = (
                 float(self._psi(self.active_end)) - float(self._psi(self.active_start))
@@ -2460,6 +2469,7 @@ class _GearGenerator:
                 undercut_count=undercut_count,
                 hybrid_undercut_count=hybrid_undercut_count,
                 protected_flanks=tuple(protected_flanks),
+                addendum_edges=tuple(addendum_edges),
             )
 
         root_blank, count, chord = self._analytic_root_blank(driven, samples_per_radian)
@@ -2576,7 +2586,7 @@ class _GearGenerator:
             total_samples += count
             maximum_chord_error = max(maximum_chord_error, chord)
 
-            # The rolling cutter may reshape only the closure between the two
+            # The curve cutter may reshape only the closure between the two
             # working-flank transitions. Closing that root boundary directly
             # includes hybrid cusp stock even when it lies outside the pitch
             # curve, without admitting any working flank or addendum material.
@@ -2662,48 +2672,7 @@ class _GearGenerator:
             undercut_count=undercut_count,
             hybrid_undercut_count=hybrid_undercut_count,
             protected_flanks=tuple(protected_flanks),
-        )
-
-    @staticmethod
-    def _place_geometry(
-        geometry: Geometry,
-        angle: float,
-        translate_x: float = 0.0,
-        translate_y: float = 0.0,
-    ) -> Geometry:
-        if isinstance(geometry, Polygon) and not geometry.interiors:
-            return _transform_outline(
-                np.asarray(geometry.exterior.coords, dtype=float),
-                angle,
-                translate_x,
-                translate_y,
-            )
-        cosine = math.cos(angle)
-        sine = math.sin(angle)
-        return affinity.affine_transform(
-            geometry,
-            [cosine, -sine, sine, cosine, translate_x, translate_y],
-        )
-
-    @staticmethod
-    def _unplace_geometry(
-        geometry: Geometry,
-        angle: float,
-        translate_x: float = 0.0,
-        translate_y: float = 0.0,
-    ) -> Geometry:
-        cosine = math.cos(angle)
-        sine = math.sin(angle)
-        return affinity.affine_transform(
-            geometry,
-            [
-                cosine,
-                sine,
-                -sine,
-                cosine,
-                -cosine * translate_x - sine * translate_y,
-                sine * translate_x - cosine * translate_y,
-            ],
+            addendum_edges=tuple(addendum_edges),
         )
 
     def _analytic_pitch_material(self, driven: bool) -> Polygon:
@@ -2746,33 +2715,6 @@ class _GearGenerator:
             make_valid(Polygon(np.column_stack((ring.real, ring.imag))))
         )
 
-    def _protected_flank_points(
-        self,
-        span: _ProtectedFlankSpan,
-        *,
-        minimum_samples: int = MIN_CLOSURE_CURVE_SAMPLES,
-    ) -> NDArray[np.complex128]:
-        sample_count = max(
-            minimum_samples,
-            math.ceil(
-                abs(span.end_arc - span.start_arc)
-                / self.config.module
-                * INTERSECTION_SAMPLES_PER_PITCH
-                / math.pi
-            ),
-        )
-        common_arc = np.linspace(
-            span.start_arc,
-            span.end_arc,
-            sample_count + 1,
-        )
-        return self._analytic_involute_points(
-            driven=span.driven,
-            tooth_phase=span.phase,
-            sign=span.sign,
-            common_arc=common_arc,
-        )
-
     def _boundary_distances(
         self,
         outline: FloatArray,
@@ -2800,72 +2742,34 @@ class _GearGenerator:
         spans: tuple[_ProtectedFlankSpan, ...],
         target: Geometry,
     ) -> Geometry:
-        """Return a target-interior material strip along retained flanks."""
+        """Keep curve-based root cuts off retained analytic flank spans."""
 
-        guard_width = _length_tolerance(
+        width = _length_tolerance(
             self.config.module,
-            PROTECTED_FLANK_GUARD_CHORD_FACTORS * ANALYTIC_CHORD_TOLERANCE_FACTOR,
+            UNDERCUT_PROTECTED_FLANK_GUARD_FACTOR,
         )
-        guards = [
-            LineString(
-                np.column_stack(
-                    (
-                        (points := self._protected_flank_points(span)).real,
-                        points.imag,
-                    )
-                )
-            ).buffer(
-                guard_width,
-                quad_segs=TRIM_BUFFER_QUADRANT_SEGMENTS,
+        guards: list[Geometry] = []
+        for span in spans:
+            common_arc = np.linspace(
+                span.start_arc,
+                span.end_arc,
+                MIN_CLOSURE_CURVE_SAMPLES + 1,
             )
-            for span in spans
-        ]
+            points = self._analytic_involute_points(
+                driven=span.driven,
+                tooth_phase=span.phase,
+                sign=span.sign,
+                common_arc=common_arc,
+            )
+            guards.append(
+                LineString(np.column_stack((points.real, points.imag))).buffer(
+                    width,
+                    quad_segs=UNDERCUT_GUARD_BUFFER_QUADRANT_SEGMENTS,
+                )
+            )
         if not guards:
             return Point(0.0, 0.0).buffer(0.0)
         return union_all(guards).intersection(target)
-
-    def _protected_addendum_guard(
-        self,
-        driven: bool,
-        target: Geometry,
-    ) -> Geometry:
-        """Return a material strip that prevents rolling cuts at tooth tips."""
-
-        teeth = self.driven_teeth if driven else self.drive_teeth
-        sample_count = max(
-            MIN_ROOT_CURVE_SAMPLES,
-            ROOT_CURVE_SAMPLES_PER_TOOTH * teeth,
-        )
-        common_arc = np.linspace(
-            0.0,
-            teeth * math.pi * self.config.module,
-            sample_count + 1,
-        )
-        points = self._analytic_offset_points(
-            driven=driven,
-            common_arc=common_arc,
-            height=self.addendum,
-        )
-        guard_width = _length_tolerance(
-            self.config.module,
-            PROTECTED_FLANK_GUARD_CHORD_FACTORS * ANALYTIC_CHORD_TOLERANCE_FACTOR,
-        )
-        return (
-            LineString(np.column_stack((points.real, points.imag)))
-            .buffer(
-                guard_width,
-                quad_segs=TRIM_BUFFER_QUADRANT_SEGMENTS,
-            )
-            .intersection(target)
-        )
-
-    def _rolling_core_guard(self) -> Geometry:
-        """Protect the connected support core from mutual cutter erosion."""
-
-        return Point(0.0, 0.0).buffer(
-            self._support_radius(ROOT_SUPPORT_RADIUS_PITCH_FACTOR),
-            quad_segs=SUPPORT_BUFFER_QUADRANT_SEGMENTS,
-        )
 
     def _clip_protected_flanks_to_boundary(
         self,
@@ -3044,7 +2948,7 @@ class _GearGenerator:
                     1.0,
                 )
             )
-            for offset in ROLLING_STAGGER_OFFSETS
+            for offset in VERIFICATION_STAGGER_OFFSETS
         ]
         fractions = np.unique(np.concatenate(fraction_grids))
         pitch = math.pi * self.config.module
@@ -3160,261 +3064,346 @@ class _GearGenerator:
             len(fractions),
             covered_phase_count / len(fractions),
         )
+    def _cutter_vertex_trajectory(
+        self,
+        vertex: complex,
+        *,
+        target_driven: bool,
+        common_arc: FloatArray,
+    ) -> NDArray[np.complex128]:
+        """Trace one opposing addendum corner in the target gear's frame."""
 
-    def _trim_rolling_nonworking_interference(
+        values = np.asarray(common_arc, dtype=float)
+        phi = self._phi_from_common_arc(values)
+        drive_angle = phi - self.active_start
+        psi_start = float(self._psi(self.active_start))
+        driven_angle = -(
+            np.asarray(self._psi(phi), dtype=float) - psi_start
+        )
+        relative_angle = driven_angle - drive_angle
+        center = self.center_distance * np.exp(-1j * drive_angle)
+        if target_driven:
+            return np.asarray(
+                (vertex - center) * np.exp(-1j * relative_angle),
+                dtype=np.complex128,
+            )
+        return np.asarray(
+            vertex * np.exp(1j * relative_angle) + center,
+            dtype=np.complex128,
+        )
+
+    def _cut_cutter_based_undercuts(
         self,
         drive: FloatArray,
         driven: FloatArray,
-        drive_trim_zone: Geometry,
-        driven_trim_zone: Geometry,
-        drive_flanks: tuple[_ProtectedFlankSpan, ...],
-        driven_flanks: tuple[_ProtectedFlankSpan, ...],
+        drive_result: _AnalyticGearResult,
+        driven_result: _AnalyticGearResult,
         *,
         samples_per_radian: int,
-        has_hybrid_undercut: bool,
-    ) -> tuple[FloatArray, FloatArray, int, float, float, float, int]:
-        """Trim root interference by rolling the finished pair.
+    ) -> tuple[FloatArray, FloatArray, int, int, float, float]:
+        """Cut hybrid roots with closed opposing-addendum vertex trajectories.
 
-        Retained analytic flanks, addendum geometry, and connected support
-        cores are protected. Both gears are updated from the same grid snapshot
-        and closed-gear grids repeat to a sampled fixed point. Open profiles
-        retain a single pass because their endpoint closures are not periodic
-        cutter stock.
+        A hybrid cusp signals that a cutter-generated root is required, but
+        the interfering root can belong to either member. Both endpoints of
+        every opposing addendum are therefore traced against both initial
+        gears. The deepest penetrating trajectories identify the required
+        cuts; each is padded beyond its stock-intersection interval, closed,
+        and subtracted only from the target's analytic root region.
         """
 
-        drive_geometry: Geometry = Polygon(drive[:-1])
-        driven_geometry: Geometry = Polygon(driven[:-1])
-        drive_flank_guard = self._protected_flank_guard(drive_flanks, drive_geometry)
-        driven_flank_guard = self._protected_flank_guard(driven_flanks, driven_geometry)
-        drive_addendum_guard = self._protected_addendum_guard(False, drive_geometry)
-        driven_addendum_guard = self._protected_addendum_guard(True, driven_geometry)
-        drive_core_guard = self._rolling_core_guard().intersection(drive_geometry)
-        driven_core_guard = self._rolling_core_guard().intersection(driven_geometry)
-        drive_exclusion = union_all(
-            [drive_flank_guard, drive_addendum_guard, drive_core_guard]
+        detected_hybrid_count = (
+            drive_result.hybrid_undercut_count
+            + driven_result.hybrid_undercut_count
         )
-        driven_exclusion = union_all(
-            [driven_flank_guard, driven_addendum_guard, driven_core_guard]
-        )
-        phase_count = max(
-            ROLLING_MIN_PHASES,
-            (
-                (
-                    HYBRID_ROLLING_PHASES_PER_TOOTH
-                    if has_hybrid_undercut
-                    else ROLLING_PHASES_PER_TOOTH
-                )
-                * max(self.drive_teeth, self.driven_teeth)
-                if self.closed
-                else 0
-            ),
-            (
-                math.ceil(abs(self.active_end - self.active_start) * samples_per_radian)
-                if has_hybrid_undercut
-                else 0
-            ),
-        )
-        overlap_tolerance = self._overlap_area_tolerance()
-        trim_clearance = _length_tolerance(
-            self.config.module, ANALYTIC_CHORD_TOLERANCE_FACTOR
-        )
-        convergence_tolerance = ROLLING_CONVERGENCE_AREA_FACTOR * self.config.module**2
-        overlay_precision = _length_tolerance(
-            self.config.module,
-            OUTLINE_CONNECTIVITY_TOLERANCE_FACTOR,
-        )
-        psi_start = float(self._psi(self.active_start))
-        pose_grids: list[tuple[tuple[float, float, float], ...]] = []
-        for offset in ROLLING_STAGGER_OFFSETS:
-            fractions = (
-                (np.arange(phase_count) + offset) / phase_count
-                if self.closed
-                else np.clip(
-                    (np.arange(phase_count) + offset) / max(1, phase_count - 1),
-                    0.0,
-                    1.0,
-                )
-            )
-            phis = self.active_start + (self.active_end - self.active_start) * fractions
-            drive_angles = phis - self.active_start
-            driven_angles = -(np.asarray(self._psi(phis), dtype=float) - psi_start)
-            relative_angles = driven_angles - drive_angles
-            center_x = self.center_distance * np.cos(drive_angles)
-            center_y = -self.center_distance * np.sin(drive_angles)
-            pose_grids.append(
-                tuple(
-                    zip(
-                        relative_angles.tolist(),
-                        center_x.tolist(),
-                        center_y.tolist(),
-                    )
-                )
-            )
-        initial_overlap = 0.0
-        remaining_overlap = 0.0
-        total_removed_area = 0.0
-        total_phases = 0
-        pass_count = 0
-        cut_closing = _length_tolerance(self.config.module, ROLLING_CUT_CLOSING_FACTOR)
 
-        def regularized_cut(cuts: list[Geometry]) -> Geometry:
-            raw_cut = set_precision(
-                union_all(cuts, grid_size=overlay_precision),
+        pitch = math.pi * self.config.module
+        active_common_end = self.drive_teeth * pitch
+        if self.closed:
+            search_low = 0.0
+            search_high = active_common_end
+            available_low = -math.inf
+            available_high = math.inf
+        else:
+            available_arc = self.center_distance * (
+                self.arc_integral.prefix
+                - float(self.arc_integral._antiderivative(self.active_start))
+            )
+            available_low = float(available_arc[0])
+            available_high = float(available_arc[-1])
+            search_padding = OPEN_UNDERCUT_VERTEX_SEARCH_PADDING_PITCHES * pitch
+            search_low = max(available_low, -search_padding)
+            search_high = min(
+                available_high,
+                active_common_end + search_padding,
+            )
+        search_span = search_high - search_low
+        search_count = max(
+            UNDERCUT_VERTEX_INTERSECTION_SAMPLES,
+            math.ceil(
+                search_span
+                / pitch
+                * UNDERCUT_VERTEX_SEARCH_SAMPLES_PER_TOOTH
+            ),
+        )
+        search_common_arc = np.linspace(
+            search_low,
+            search_high,
+            search_count,
+            endpoint=not self.closed,
+        )
+        search_step = (
+            search_span / search_count
+            if self.closed
+            else search_span / max(1, search_count - 1)
+        )
+
+        # (penetration, target_is_driven, vertex, first_outside, last_outside)
+        candidates: list[tuple[float, bool, complex, float, float]] = []
+
+        def locate_candidates(
+            outline: FloatArray,
+            cutter_edges: tuple[_AddendumEdge, ...],
+            *,
+            target_driven: bool,
+        ) -> None:
+            target = Polygon(outline[:-1])
+            for edge in cutter_edges:
+                for vertex in (edge.minus_vertex, edge.plus_vertex):
+                    trajectory = self._cutter_vertex_trajectory(
+                        vertex,
+                        target_driven=target_driven,
+                        common_arc=search_common_arc,
+                    )
+                    inside = np.asarray(
+                        contains_xy(target, trajectory.real, trajectory.imag),
+                        dtype=bool,
+                    )
+                    inside_indices = np.flatnonzero(inside)
+                    if not len(inside_indices):
+                        continue
+                    runs = list(
+                        np.split(
+                            inside_indices,
+                            np.flatnonzero(np.diff(inside_indices) > 1) + 1,
+                        )
+                    )
+                    if self.closed and inside[0] and inside[-1]:
+                        if len(runs) == 1:
+                            raise RuntimeError(
+                                "An addendum vertex remains inside the opposing "
+                                "gear for the complete motion cycle"
+                            )
+                        seam_run = np.concatenate(
+                            (runs[-1] - search_count, runs[0])
+                        )
+                        runs = [seam_run, *runs[1:-1]]
+
+                    for run in runs:
+                        first_inside = int(run[0])
+                        last_inside = int(run[-1])
+                        if not self.closed and (
+                            first_inside == 0
+                            or last_inside == search_count - 1
+                        ):
+                            raise RuntimeError(
+                                "An addendum vertex intersection reaches an open "
+                                "motion endpoint; increase source-domain padding"
+                            )
+                        indices = np.mod(run, search_count)
+                        run_points = trajectory[indices]
+                        distances = target.boundary.distance(
+                            shapely_points(
+                                np.column_stack(
+                                    (run_points.real, run_points.imag)
+                                )
+                            )
+                        )
+                        penetration = float(
+                            np.max(np.asarray(distances, dtype=float))
+                        )
+                        first_outside = max(
+                            search_low + (first_inside - 1) * search_step,
+                            available_low,
+                        )
+                        last_outside = min(
+                            search_low + (last_inside + 1) * search_step,
+                            available_high,
+                        )
+                        candidates.append(
+                            (
+                                penetration,
+                                target_driven,
+                                vertex,
+                                first_outside,
+                                last_outside,
+                            )
+                        )
+
+        locate_candidates(
+            drive,
+            driven_result.addendum_edges,
+            target_driven=False,
+        )
+        locate_candidates(
+            driven,
+            drive_result.addendum_edges,
+            target_driven=True,
+        )
+        minimum_penetration = _length_tolerance(
+            self.config.module,
+            UNDERCUT_VERTEX_MIN_PENETRATION_FACTOR,
+        )
+        selected_candidates = sorted(
+            (
+                candidate
+                for candidate in candidates
+                if candidate[0] > minimum_penetration
+            ),
+            key=lambda candidate: candidate[0],
+            reverse=True,
+        )
+        if len(selected_candidates) < detected_hybrid_count:
+            raise RuntimeError(
+                "Detected hybrid undercuts exceed the significant opposing "
+                "addendum vertex penetrations"
+            )
+        if not selected_candidates:
+            precision = _length_tolerance(
+                self.config.module,
+                OUTLINE_CONNECTIVITY_TOLERANCE_FACTOR,
+            )
+            tolerance = _length_tolerance(
+                self.config.module,
+                GEOMETRY_LENGTH_TOLERANCE_FACTOR,
+            )
+            return (
+                _outline(
+                    _normalize_polygon_precision(Polygon(drive[:-1]), precision),
+                    tolerance,
+                ),
+                _outline(
+                    _normalize_polygon_precision(Polygon(driven[:-1]), precision),
+                    tolerance,
+                ),
+                0,
+                0,
+                0.0,
                 0.0,
             )
-            closed_cut = make_valid(
-                raw_cut.buffer(
-                    cut_closing,
-                    quad_segs=ROLLING_CUT_BUFFER_QUADRANT_SEGMENTS,
-                ).buffer(
-                    -cut_closing,
-                    quad_segs=ROLLING_CUT_BUFFER_QUADRANT_SEGMENTS,
+
+        targets = {
+            False: Polygon(drive[:-1]),
+            True: Polygon(driven[:-1]),
+        }
+        trim_zones = {
+            False: drive_result.root_trim_zone,
+            True: driven_result.root_trim_zone,
+        }
+        protected_guards = {
+            False: self._protected_flank_guard(
+                drive_result.protected_flanks,
+                targets[False],
+            ),
+            True: self._protected_flank_guard(
+                driven_result.protected_flanks,
+                targets[True],
+            ),
+        }
+        cuts: dict[bool, list[Geometry]] = {False: [], True: []}
+        total_curve_samples = 0
+        maximum_curve_chord_error = 0.0
+        padding = UNDERCUT_VERTEX_SWEEP_PADDING_PITCHES * pitch
+
+        for (
+            _,
+            target_driven,
+            vertex,
+            first_outside,
+            last_outside,
+        ) in selected_candidates:
+            sweep_start = max(first_outside - padding, available_low)
+            sweep_end = min(last_outside + padding, available_high)
+            curve, sample_count, chord_error = self._sample_analytic_curve(
+                lambda values, corner=vertex, target=target_driven: (
+                    self._cutter_vertex_trajectory(
+                        corner,
+                        target_driven=target,
+                        common_arc=values,
+                    )
+                ),
+                sweep_start,
+                sweep_end,
+                samples_per_radian,
+                minimum_samples=MIN_CLOSURE_CURVE_SAMPLES,
+                chord_tolerance_factor=UNDERCUT_VERTEX_CHORD_TOLERANCE_FACTOR,
+            )
+            curve_coordinates = np.column_stack((curve.real, curve.imag))
+            closed_curve = make_valid(Polygon(curve_coordinates))
+            if not self.closed:
+                closed_curve = union_all(
+                    [
+                        closed_curve,
+                        LineString(curve_coordinates).buffer(
+                            OPEN_UNDERCUT_VERTEX_CUT_HALF_WIDTH_FACTOR
+                            * self.config.module,
+                            quad_segs=8,
+                        ),
+                    ]
                 )
+            closed_curve = closed_curve.buffer(
+                _length_tolerance(
+                    self.config.module,
+                    UNDERCUT_VERTEX_BOOLEAN_CLEARANCE_FACTOR,
+                ),
+                quad_segs=UNDERCUT_GUARD_BUFFER_QUADRANT_SEGMENTS,
             )
-            return union_all([raw_cut, closed_cut]).buffer(
-                trim_clearance,
-                quad_segs=TRIM_BUFFER_QUADRANT_SEGMENTS,
+            cut = (
+                closed_curve.intersection(trim_zones[target_driven])
+                .intersection(targets[target_driven])
+                .difference(protected_guards[target_driven])
             )
-
-        def polygonal_cut(geometry: Geometry) -> Geometry | None:
-            parts = _polygon_parts(make_valid(geometry))
-            if not parts:
-                return None
-            return parts[0] if len(parts) == 1 else MultiPolygon(parts)
-
-        maximum_passes = ROLLING_MAX_PASSES if self.closed else 1
-        for pass_index in range(maximum_passes):
-            pass_count = pass_index + 1
-            pass_removed_area = 0.0
-            pass_maximum_overlap = 0.0
-            for offset, poses in zip(ROLLING_STAGGER_OFFSETS, pose_grids):
-                drive_cuts: list[Geometry] = []
-                driven_cuts: list[Geometry] = []
-                grid_maximum = 0.0
-
-                def phase_nonworking_cut(
-                    pose: tuple[float, float, float],
-                    current_drive: Geometry = drive_geometry,
-                    current_driven: Geometry = driven_geometry,
-                ) -> tuple[float, Geometry | None, Geometry | None]:
-                    relative_angle, center_x, center_y = pose
-                    placed_driven = self._place_geometry(
-                        current_driven,
-                        relative_angle,
-                        center_x,
-                        center_y,
-                    )
-                    overlap = current_drive.intersection(placed_driven)
-                    area = float(overlap.area)
-                    if area <= overlap_tolerance:
-                        return area, None, None
-                    drive_overlap = overlap.intersection(drive_trim_zone).difference(
-                        drive_exclusion
-                    )
-                    local_overlap = self._unplace_geometry(
-                        overlap,
-                        relative_angle,
-                        center_x,
-                        center_y,
-                    )
-                    driven_overlap = local_overlap.intersection(
-                        driven_trim_zone
-                    ).difference(driven_exclusion)
-                    local_drive_cut = polygonal_cut(drive_overlap)
-                    local_driven_cut = (
-                        polygonal_cut(driven_overlap)
-                        if not driven_overlap.is_empty
-                        else None
-                    )
-                    return (
-                        area,
-                        local_drive_cut,
-                        local_driven_cut,
-                    )
-
-                with ThreadPoolExecutor(
-                    max_workers=min(_MAX_GEOMETRY_WORKERS, len(poses))
-                ) as executor:
-                    phase_results = executor.map(
-                        phase_nonworking_cut,
-                        poses,
-                    )
-                    for (
-                        area,
-                        drive_overlap,
-                        driven_overlap,
-                    ) in phase_results:
-                        grid_maximum = max(grid_maximum, area)
-                        if drive_overlap is not None:
-                            drive_cuts.append(drive_overlap)
-                        if driven_overlap is not None:
-                            driven_cuts.append(driven_overlap)
-                total_phases += len(poses)
-                if pass_index == 0 and offset == 0.0:
-                    initial_overlap = grid_maximum
-                pass_maximum_overlap = max(pass_maximum_overlap, grid_maximum)
-                if not drive_cuts and not driven_cuts:
-                    continue
-                before_drive = float(drive_geometry.area)
-                before_driven = float(driven_geometry.area)
-                if drive_cuts:
-                    drive_cut = regularized_cut(drive_cuts)
-                    if self.closed:
-                        drive_cut = drive_cut.difference(drive_exclusion)
-                    drive_cut = drive_cut.intersection(drive_trim_zone)
-                    drive_geometry = drive_geometry.difference(drive_cut)
-                if driven_cuts:
-                    driven_cut = regularized_cut(driven_cuts)
-                    if self.closed:
-                        driven_cut = driven_cut.difference(driven_exclusion)
-                    driven_cut = driven_cut.intersection(driven_trim_zone)
-                    driven_geometry = driven_geometry.difference(driven_cut)
-                drive_geometry = _clean_polygon(drive_geometry)
-                driven_geometry = _clean_polygon(driven_geometry)
-                removed_area = (
-                    before_drive
-                    - float(drive_geometry.area)
-                    + before_driven
-                    - float(driven_geometry.area)
+            if cut.area <= 0.0:
+                member = "driven" if target_driven else "drive"
+                raise RuntimeError(
+                    f"{member.capitalize()} addendum-vertex curve removed no "
+                    "material from the detected undercut"
                 )
-                pass_removed_area += removed_area
-                total_removed_area += removed_area
-            remaining_overlap = pass_maximum_overlap
-            if not self.closed or pass_removed_area <= convergence_tolerance:
-                break
-        else:
-            raise RuntimeError(
-                "Opposing-gear cutter trimming did not converge within "
-                f"{maximum_passes} passes"
+            cuts[target_driven].append(cut)
+            total_curve_samples += sample_count
+            maximum_curve_chord_error = max(
+                maximum_curve_chord_error,
+                chord_error,
             )
 
-        # Repeated full-precision overlay can leave two boundaries that are
-        # mathematically coincident separated by a few ULPs. Collapse those
-        # nonphysical root slivers before extracting the finished outlines.
-        drive_geometry = _clean_polygon_at_precision(
-            drive_geometry,
-            overlay_precision,
+        total_removed_area = 0.0
+        for target_driven in (False, True):
+            member_cuts = cuts[target_driven]
+            if not member_cuts:
+                continue
+            before = targets[target_driven]
+            after = _normalize_polygon_precision(
+                before.difference(union_all(member_cuts)),
+                _length_tolerance(
+                    self.config.module,
+                    OUTLINE_CONNECTIVITY_TOLERANCE_FACTOR,
+                ),
+            )
+            total_removed_area += float(before.area - after.area)
+            targets[target_driven] = after
+
+        tolerance = _length_tolerance(
+            self.config.module,
+            GEOMETRY_LENGTH_TOLERANCE_FACTOR,
         )
-        driven_geometry = _clean_polygon_at_precision(
-            driven_geometry,
-            overlay_precision,
-        )
-        drive_outline = _outline(
-            drive_geometry,
-            _length_tolerance(self.config.module, GEOMETRY_LENGTH_TOLERANCE_FACTOR),
-        )
-        driven_outline = _outline(
-            driven_geometry,
-            _length_tolerance(self.config.module, GEOMETRY_LENGTH_TOLERANCE_FACTOR),
-        )
+        drive = _outline(targets[False], tolerance)
+        driven = _outline(targets[True], tolerance)
         return (
-            drive_outline,
-            driven_outline,
-            total_phases,
-            initial_overlap,
-            remaining_overlap,
+            drive,
+            driven,
+            len(selected_candidates),
+            total_curve_samples,
+            maximum_curve_chord_error,
             total_removed_area,
-            pass_count,
         )
 
     @staticmethod
@@ -3457,7 +3446,7 @@ class _GearGenerator:
                     1.0,
                 )
             )
-            for offset in ROLLING_STAGGER_OFFSETS
+            for offset in VERIFICATION_STAGGER_OFFSETS
         ]
         fractions = np.unique(np.concatenate(fraction_grids))
         psi_start = float(self._psi(self.active_start))
@@ -3494,10 +3483,9 @@ class _GearGenerator:
         overlap_tolerance = self._overlap_area_tolerance()
         if maximum_overlap > overlap_tolerance:
             raise RuntimeError(
-                "Root-only rolling trim left protected-flank or addendum "
-                f"overlap area {maximum_overlap:.9g} above tolerance "
-                f"{overlap_tolerance:.9g}; resolving it would require "
-                "modifying finished tooth geometry"
+                "Addendum-vertex undercut curves left sampled solid overlap "
+                f"area {maximum_overlap:.9g} above tolerance "
+                f"{overlap_tolerance:.9g}"
             )
 
         contact_area_tolerance = CONTACT_AREA_TOLERANCE_FACTOR * self.config.module**2
@@ -3743,20 +3731,16 @@ class _GearGenerator:
         (
             drive,
             driven,
-            rolling_trim_phase_count,
-            rolling_initial_overlap,
-            rolling_sampled_overlap,
-            rolling_removed_area,
-            rolling_trim_pass_count,
-        ) = self._trim_rolling_nonworking_interference(
+            undercut_curve_count,
+            undercut_curve_sample_count,
+            maximum_undercut_curve_chord_error,
+            undercut_removed_area,
+        ) = self._cut_cutter_based_undercuts(
             drive,
             driven,
-            drive_result.root_trim_zone,
-            driven_result.root_trim_zone,
-            drive_result.protected_flanks,
-            driven_result.protected_flanks,
+            drive_result,
+            driven_result,
             samples_per_radian=samples_per_radian,
-            has_hybrid_undercut=(hybrid_undercut_count > 0),
         )
         outline_connectivity_tolerance = _length_tolerance(
             self.config.module,
@@ -3771,9 +3755,6 @@ class _GearGenerator:
             driven,
             label="driven",
             tolerance=outline_connectivity_tolerance,
-        )
-        rolling_base_phase_count = rolling_trim_phase_count // (
-            rolling_trim_pass_count * len(ROLLING_STAGGER_OFFSETS)
         )
         posttrim_drive_flank_error, posttrim_drive_regular_factor = (
             self._verify_protected_flanks(
@@ -3958,7 +3939,7 @@ class _GearGenerator:
             "geometry_worker_limit": _MAX_GEOMETRY_WORKERS,
             "overlap_area_tolerance": self._overlap_area_tolerance(),
             "verification_method": "staggered_sampled_phase_grid",
-            "verification_stagger_grid_count": len(ROLLING_STAGGER_OFFSETS),
+            "verification_stagger_grid_count": len(VERIFICATION_STAGGER_OFFSETS),
             "outline_connectivity_verification": ("precision_noded_single_closed_loop"),
             "outline_connectivity_tolerance": outline_connectivity_tolerance,
             "drive_outline_is_single_closed_loop": True,
@@ -4018,32 +3999,26 @@ class _GearGenerator:
             "protected_contact_coverage_fraction": (
                 protected_contact_coverage_fraction
             ),
-            "rolling_nonworking_trim_scope": "analytic_root_regions",
-            "rolling_nonworking_root_zone": (
-                "pitch_material_plus_analytic_root_closures"
+            "cutter_undercut_method": (
+                "opposing_addendum_edge_vertex_trajectories"
             ),
-            "rolling_nonworking_protected_geometry": (
-                "working_flanks_addendum_and_support_core"
+            "cutter_undercut_trim_scope": "intersected_analytic_root_regions",
+            "cutter_undercut_vertices_per_addendum": 2,
+            "cutter_undercut_curve_count": undercut_curve_count,
+            "cutter_undercut_curve_sample_count": undercut_curve_sample_count,
+            "cutter_undercut_maximum_chord_error": (
+                maximum_undercut_curve_chord_error
             ),
-            "rolling_nonworking_trim_phase_count": rolling_trim_phase_count,
-            "rolling_nonworking_base_phase_count": rolling_base_phase_count,
-            "rolling_nonworking_effective_phase_count_per_pass": (
-                rolling_base_phase_count * len(ROLLING_STAGGER_OFFSETS)
+            "cutter_undercut_sweep_padding": (
+                UNDERCUT_VERTEX_SWEEP_PADDING_PITCHES * math.pi * self.config.module
             ),
-            "rolling_nonworking_maximum_angular_step": (
-                abs(self.active_end - self.active_start) / rolling_base_phase_count
+            "cutter_undercut_boolean_clearance": (
+                UNDERCUT_VERTEX_BOOLEAN_CLEARANCE_FACTOR * self.config.module
             ),
-            "rolling_nonworking_cut_regularization": (
-                "conservative_morphological_closing"
+            "open_cutter_undercut_curve_half_width": (
+                OPEN_UNDERCUT_VERTEX_CUT_HALF_WIDTH_FACTOR * self.config.module
             ),
-            "rolling_nonworking_cut_closing_distance": (
-                ROLLING_CUT_CLOSING_FACTOR * self.config.module
-            ),
-            "rolling_nonworking_overlay_precision": outline_connectivity_tolerance,
-            "rolling_nonworking_trim_pass_count": rolling_trim_pass_count,
-            "rolling_nonworking_initial_overlap_area": rolling_initial_overlap,
-            "rolling_nonworking_sampled_overlap_area": rolling_sampled_overlap,
-            "rolling_nonworking_removed_area": rolling_removed_area,
+            "cutter_undercut_removed_area": undercut_removed_area,
             "preclearance_placed_pair_overlap_area": (preclearance_maximum_overlap),
             "placed_pair_overlap_area": maximum_overlap,
             "centrodes_are_convex": self.centrodes_are_convex,
@@ -4058,15 +4033,15 @@ class _GearGenerator:
             "maximum_analytic_chord_error": maximum_chord_error,
             "nonworking_closure": (
                 "analytic_rack_tip_and_dedendum_envelopes"
-                if hybrid_undercut_count == 0
-                else "analytic_fillets_with_opposing_gear_undercuts"
+                if undercut_curve_count == 0
+                else "analytic_fillets_with_addendum_vertex_undercuts"
             ),
             "requested_fillet_radius": self.fillet_radius,
-            "requested_fillet_applied_to_closure": (hybrid_undercut_count == 0),
+            "requested_fillet_applied_to_closure": (undercut_curve_count == 0),
             "fillet_closure_mode": (
                 "analytic_only"
-                if hybrid_undercut_count == 0
-                else "analytic_with_hybrid_opposing_cutter"
+                if undercut_curve_count == 0
+                else "analytic_with_addendum_vertex_cutter"
             ),
             "verification_phase_count": verification_phases,
             "preclearance_contact_verification_phase_count": (

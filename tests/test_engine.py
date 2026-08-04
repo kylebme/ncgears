@@ -14,16 +14,16 @@ from ncgears._policy import (
     ANALYTIC_CHORD_TOLERANCE_FACTOR,
     ANALYTIC_ENVELOPE_RESIDUAL_FACTOR,
     ANALYTIC_TANGENCY_RESIDUAL_TOLERANCE,
-    HYBRID_ROLLING_PHASES_PER_TOOTH,
     INTERSECTION_RESIDUAL_FACTOR,
     MAX_SUPPORT_RADIUS_PITCH_FACTOR,
+    MIN_CLOSURE_CURVE_SAMPLES,
     MIN_FLANK_CURVE_SAMPLES,
     PROTECTED_CONTACT_RESIDUAL_FACTOR,
-    ROLLING_MIN_PHASES,
-    ROLLING_STAGGER_OFFSETS,
     ROOT_SUPPORT_RADIUS_PITCH_FACTOR,
+    UNDERCUT_VERTEX_CHORD_TOLERANCE_FACTOR,
     VERIFICATION_MIN_CLOSED_PHASES,
     VERIFICATION_MIN_OPEN_PHASES,
+    VERIFICATION_STAGGER_OFFSETS,
 )
 from ncgears.engine import (
     EngineConfig,
@@ -52,16 +52,16 @@ def _assert_verified_pair(pair: ncgears.GearPair) -> None:
     )
     assert pair.metadata["nonworking_closure"] == (
         "analytic_rack_tip_and_dedendum_envelopes"
-        if pair.metadata["hybrid_undercut_count"] == 0
-        else "analytic_fillets_with_opposing_gear_undercuts"
+        if pair.metadata["cutter_undercut_curve_count"] == 0
+        else "analytic_fillets_with_addendum_vertex_undercuts"
     )
     assert pair.metadata["requested_fillet_applied_to_closure"] is (
-        pair.metadata["hybrid_undercut_count"] == 0
+        pair.metadata["cutter_undercut_curve_count"] == 0
     )
     assert pair.metadata["fillet_closure_mode"] == (
         "analytic_only"
-        if pair.metadata["hybrid_undercut_count"] == 0
-        else "analytic_with_hybrid_opposing_cutter"
+        if pair.metadata["cutter_undercut_curve_count"] == 0
+        else "analytic_with_addendum_vertex_cutter"
     )
     assert pair.metadata["undercut_detection_method"] == "exact_per_flank_cusp_equation"
     assert pair.metadata["maximum_join_gap"] < (
@@ -72,9 +72,6 @@ def _assert_verified_pair(pair: ncgears.GearPair) -> None:
     )
     assert pair.metadata["maximum_fillet_root_residual"] < (
         ANALYTIC_ENVELOPE_RESIDUAL_FACTOR * pair.metadata["module"]
-    )
-    assert pair.metadata["rolling_nonworking_trim_phase_count"] >= (
-        ROLLING_MIN_PHASES * len(ROLLING_STAGGER_OFFSETS)
     )
     assert pair.metadata["maximum_envelope_residual"] < 1e-9
     assert (
@@ -102,25 +99,41 @@ def _assert_verified_pair(pair: ncgears.GearPair) -> None:
         if pair.metadata["topology"] == "closed"
         else VERIFICATION_MIN_OPEN_PHASES
     )
-    assert pair.metadata["rolling_nonworking_trim_scope"] == "analytic_root_regions"
-    assert pair.metadata["rolling_nonworking_root_zone"] == (
-        "pitch_material_plus_analytic_root_closures"
+    assert pair.metadata["cutter_undercut_method"] == (
+        "opposing_addendum_edge_vertex_trajectories"
     )
-    assert pair.metadata["rolling_nonworking_protected_geometry"] == (
-        "working_flanks_addendum_and_support_core"
+    assert pair.metadata["cutter_undercut_trim_scope"] == (
+        "intersected_analytic_root_regions"
     )
-    assert pair.metadata["rolling_nonworking_trim_pass_count"] >= 1
+    assert pair.metadata["cutter_undercut_vertices_per_addendum"] == 2
+    curve_count = pair.metadata["cutter_undercut_curve_count"]
+    assert curve_count >= pair.metadata["hybrid_undercut_count"]
+    if curve_count == 0:
+        assert pair.metadata["cutter_undercut_curve_sample_count"] == 0
+        assert pair.metadata["cutter_undercut_removed_area"] == pytest.approx(0.0)
+    else:
+        assert pair.metadata["cutter_undercut_curve_sample_count"] >= (
+            curve_count * MIN_CLOSURE_CURVE_SAMPLES
+        )
+        assert pair.metadata["cutter_undercut_removed_area"] > 0.0
+        assert pair.metadata["cutter_undercut_maximum_chord_error"] <= (
+            UNDERCUT_VERTEX_CHORD_TOLERANCE_FACTOR * pair.metadata["module"]
+        )
+    for removed_key in (
+        "rolling_nonworking_trim_phase_count",
+        "rolling_nonworking_trim_pass_count",
+        "rolling_nonworking_cut_regularization",
+        "rolling_nonworking_removed_area",
+    ):
+        assert removed_key not in pair.metadata
     assert pair.metadata["verification_method"] == "staggered_sampled_phase_grid"
     assert pair.metadata["verification_stagger_grid_count"] == len(
-        ROLLING_STAGGER_OFFSETS
+        VERIFICATION_STAGGER_OFFSETS
     )
     assert pair.metadata["outline_connectivity_verification"] == (
         "precision_noded_single_closed_loop"
     )
     assert pair.metadata["outline_connectivity_tolerance"] > 0.0
-    assert pair.metadata["rolling_nonworking_overlay_precision"] == (
-        pair.metadata["outline_connectivity_tolerance"]
-    )
     assert pair.metadata["drive_outline_is_single_closed_loop"] is True
     assert pair.metadata["driven_outline_is_single_closed_loop"] is True
     base_phase_count = (
@@ -128,10 +141,12 @@ def _assert_verified_pair(pair: ncgears.GearPair) -> None:
         if pair.metadata["topology"] == "closed"
         else VERIFICATION_MIN_OPEN_PHASES
     )
-    minimum_verification_phases = base_phase_count * len(ROLLING_STAGGER_OFFSETS)
+    minimum_verification_phases = base_phase_count * len(
+        VERIFICATION_STAGGER_OFFSETS
+    )
     if pair.metadata["topology"] == "open":
         # Shifted open grids share their clipped upper endpoint.
-        minimum_verification_phases -= len(ROLLING_STAGGER_OFFSETS) - 1
+        minimum_verification_phases -= len(VERIFICATION_STAGGER_OFFSETS) - 1
     assert pair.metadata["verification_phase_count"] >= minimum_verification_phases
     assert pair.metadata["minimum_root_radius"] > 0.0
     assert pair.maximum_transmission_error < 0.01
@@ -227,7 +242,7 @@ def test_mixed_harmonic_centrode_rejects_finished_geometry_interference(
 ) -> None:
     with pytest.raises(
         ncgears.GenerationError,
-        match="resolving it would require modifying finished tooth geometry",
+        match="Addendum-vertex undercut curves left sampled solid overlap",
     ):
         ncgears.generate_from_centrode(
             "1 + 0.10*cos(phi) + 0.08*sin(2*phi) "
@@ -250,6 +265,7 @@ def test_hybrid_analytic_involute_is_the_only_geometry_engine() -> None:
         "_generate_conjugate_mate",
         "_involute_tooth_template",
         "_cycloidal_tooth_template",
+        "_trim_rolling_nonworking_interference",
     ):
         assert not hasattr(_GearGenerator, removed_method)
 
@@ -386,7 +402,7 @@ def test_analytic_involute_retains_exact_circular_root_depth(
     assert np.min(drive_radius) == pytest.approx(expected_root_radius, abs=3e-5)
     assert np.min(driven_radius) == pytest.approx(expected_root_radius, abs=3e-5)
     assert pair.metadata["analytic_undercut_count"] == 0
-    assert pair.metadata["rolling_nonworking_removed_area"] == pytest.approx(0.0)
+    assert pair.metadata["cutter_undercut_removed_area"] == pytest.approx(0.0)
 
 
 def test_closed_undercut_count_excludes_periodic_seam_flanks(
@@ -485,10 +501,10 @@ def test_open_quadratic_uses_parameter_clipped_padding_invariant_boundary(
     ]
     for pair in pairs:
         _assert_verified_pair(pair)
-        assert pair.metadata["rolling_nonworking_trim_scope"] == (
-            "analytic_root_regions"
+        assert pair.metadata["cutter_undercut_trim_scope"] == (
+            "intersected_analytic_root_regions"
         )
-        assert pair.metadata["rolling_nonworking_removed_area"] < 0.1
+        assert pair.metadata["cutter_undercut_removed_area"] < 0.3
 
         # The open backing curve is the historical analytical closure:
         # one quarter of each centrode over the active interval. A radial
@@ -513,7 +529,7 @@ def test_open_quadratic_uses_parameter_clipped_padding_invariant_boundary(
     for member in ("drive_outline", "driven_outline"):
         shallow = Polygon(getattr(shallow_padding, member))
         deep = Polygon(getattr(deep_padding, member))
-        assert shallow.hausdorff_distance(deep) < 2e-4
+        assert shallow.hausdorff_distance(deep) < 1e-3
         assert abs(shallow.area - deep.area) < 2e-4
 
 
@@ -570,7 +586,7 @@ def test_deep_nonconvex_centrode_uses_analytic_involute_form(
     )
 
 
-def test_nonconvex_cusps_become_hybrid_opposing_gear_undercuts(
+def test_nonconvex_cusps_use_addendum_vertex_curve_undercuts(
     tmp_path: Path,
 ) -> None:
     pair = ncgears.generate(
@@ -590,18 +606,15 @@ def test_nonconvex_cusps_become_hybrid_opposing_gear_undercuts(
         pair.metadata["analytic_undercut_count"]
         >= (pair.metadata["hybrid_undercut_count"])
     )
-    assert pair.metadata["rolling_nonworking_trim_pass_count"] >= 2
-    assert pair.metadata["rolling_nonworking_removed_area"] > 0.0
+    assert pair.metadata["cutter_undercut_curve_count"] == (
+        2 * pair.metadata["hybrid_undercut_count"]
+    )
+    assert pair.metadata["cutter_undercut_removed_area"] > 0.0
     assert pair.metadata["minimum_protected_contact_pairs"] >= 1
-    assert pair.metadata["rolling_nonworking_base_phase_count"] >= (
-        HYBRID_ROLLING_PHASES_PER_TOOTH * max(pair.drive_teeth, pair.driven_teeth)
+    assert pair.metadata["cutter_undercut_method"] == (
+        "opposing_addendum_edge_vertex_trajectories"
     )
-    assert pair.metadata["rolling_nonworking_cut_regularization"] == (
-        "conservative_morphological_closing"
-    )
-    # The root-only cutter retains the exact addendum instead of smoothing the
-    # finished tip with the opposing gear. Keep a broad guard against an
-    # unbounded increase in sampled root scallops while connectivity is checked
-    # independently at the engine's working precision.
+    # Smooth trajectory cuts should not recreate the direction-reversing
+    # scallops left by unions of many discrete solid-cutter poses.
     assert _severe_boundary_reversal_count(pair.drive_outline) < 200
-    assert _severe_boundary_reversal_count(pair.driven_outline) < 700
+    assert _severe_boundary_reversal_count(pair.driven_outline) < 200

@@ -70,7 +70,7 @@ CENTRODE_OUTLINE_SAMPLES_PER_TOOTH = 128
 GEOMETRY_LENGTH_TOLERANCE_FACTOR = 2e-7
 OUTLINE_DUPLICATE_TOLERANCE_FRACTION = 0.05
 OUTLINE_COLLINEAR_TOLERANCE_FRACTION = 0.02
-# Normalize finished rolling-cut boundaries at a finer precision than Boolean
+# Normalize finished cutter-curve boundaries at a finer precision than Boolean
 # clearance or analytic tessellation, then verify the same precision exposes
 # no surviving near-coincident slivers or hairpins.
 OUTLINE_CONNECTIVITY_TOLERANCE_FACTOR = 1e-8
@@ -79,9 +79,6 @@ OUTLINE_CONNECTIVITY_TOLERANCE_FACTOR = 1e-8
 # analytic outline chord-error budget without multiplying already-dense flank
 # vertices excessively.
 CLEARANCE_BUFFER_QUADRANT_SEGMENTS = 32
-# Keep the backtracking-edge threshold below the analytic chord budget; smooth
-# analytic vertices and genuine longer concave features remain untouched.
-OUTLINE_BACKTRACK_TOLERANCE_MULTIPLIER = 100.0
 ANALYTIC_CHORD_TOLERANCE_FACTOR = 2.5e-5
 ANALYTIC_CHORD_ACCEPTANCE_SLACK = 1.2
 ANALYTIC_JOIN_TOLERANCE_FACTOR = 1e-10
@@ -139,23 +136,40 @@ OPEN_ANALYTIC_BACKING_RADIUS_PITCH_FACTOR = 0.25
 SUPPORT_BUFFER_QUADRANT_SEGMENTS = 128
 PITCH_MASK_BUFFER_QUADRANT_SEGMENTS = 96
 
-# Rolling root trimming and final solid verification. Staggered offsets are
-# fractions of one grid cell. They reduce phase-grid alignment risk, but are
-# still a sampled check and are reported as such in metadata.
-ROLLING_MIN_PHASES = 96
-ROLLING_PHASES_PER_TOOTH = 4
-# Match the per-grid minimum used by the v0.2.1 Boolean generator when a
-# sacrificial hybrid connector actually needs a cutter-generated undercut.
-HYBRID_ROLLING_PHASES_PER_TOOTH = 24
-ROLLING_STAGGER_OFFSETS = (0.0, 0.5, 0.25, 0.75)
+# Cutter-vertex undercut generation.  The matching opposing addendum corner is
+# selected from a coarse full-motion search, then its actual stock-intersection
+# interval is resolved locally.  Padding is measured in circular pitches and
+# leaves both ends of the closed cutting curve outside the intersecting stock.
+UNDERCUT_VERTEX_SEARCH_SAMPLES_PER_TOOTH = 8
+UNDERCUT_VERTEX_INTERSECTION_SAMPLES = 513
+UNDERCUT_VERTEX_SWEEP_PADDING_PITCHES = 0.25
+OPEN_UNDERCUT_VERTEX_SEARCH_PADDING_PITCHES = 1.0
+# Vertex trajectories become finished root boundaries, so resolve them more
+# finely than the broader analytic arrangement curves.
+UNDERCUT_VERTEX_CHORD_TOLERANCE_FACTOR = 2.5e-6
+UNDERCUT_VERTEX_BOOLEAN_CLEARANCE_FACTOR = ANALYTIC_CHORD_TOLERANCE_FACTOR
+# Ignore point-in-polygon excursions below the broader analytic curve budget;
+# those are contact tessellation noise, not cutter-required penetration.
+UNDERCUT_VERTEX_MIN_PENETRATION_FACTOR = ANALYTIC_CHORD_TOLERANCE_FACTOR
+OPEN_UNDERCUT_VERTEX_CUT_HALF_WIDTH_FACTOR = 0.08
+UNDERCUT_PROTECTED_FLANK_GUARD_FACTOR = (
+    2.0 * ANALYTIC_CHORD_TOLERANCE_FACTOR
+)
+UNDERCUT_GUARD_BUFFER_QUADRANT_SEGMENTS = 2
+
+# Final solid verification. Staggered offsets are fractions of one grid cell.
+# They reduce phase-grid alignment risk, but are still a sampled check and are
+# reported as such in metadata.
+VERIFICATION_STAGGER_OFFSETS = (0.0, 0.5, 0.25, 0.75)
 VERIFICATION_MIN_CLOSED_PHASES = 64
 VERIFICATION_MIN_OPEN_PHASES = 48
 VERIFICATION_PHASES_PER_TOOTH = 4
 OVERLAP_AREA_TOLERANCE_FACTOR = 1e-6
 # A phase can involve a small contact neighborhood, not every tooth on a gear.
-# Six unit-area cells cover the observed GEOS platform variation for the same
-# tessellated contact while remaining independent of the total tooth count.
-OVERLAP_CONTACT_PAIR_ALLOWANCE = 6
+# Twenty unit-area cells cover the observed GEOS platform variation where an
+# adaptively tessellated vertex trajectory becomes the finished root boundary,
+# while remaining independent of the total tooth count.
+OVERLAP_CONTACT_PAIR_ALLOWANCE = 20
 CONTACT_AREA_TOLERANCE_FACTOR = 1e-11
 CONTACT_RECOVERY_PHASES_CLOSED = 6
 CONTACT_RECOVERY_PHASES_OPEN = 4
@@ -164,21 +178,7 @@ CONTACT_RECOVERY_PHASE_OFFSET = 0.5 * (math.sqrt(5.0) - 1.0)
 CONTACT_SEARCH_INITIAL_ANGLE = 1e-5
 CONTACT_SEARCH_MAX_ANGLE = math.radians(5.0)
 CONTACT_SEARCH_ANGLE_TOLERANCE = 1e-9
-TRIM_BUFFER_QUADRANT_SEGMENTS = 2
-# The v0.2.1 conjugate cutter used a 0.00175-module conservative expansion.
-# Closing the hybrid pass's accumulated non-working cuts on that same scale
-# fills pose-to-pose scallops without expanding the complete opposing gear at
-# every working contact.
-ROLLING_CUT_CLOSING_FACTOR = 1.75e-3
-# Keep the regularization arc faceting below the analytic chord budget.
-ROLLING_CUT_BUFFER_QUADRANT_SEGMENTS = 8
-# One-sided material guards protect retained analytic flanks during mutual
-# rolling cuts.  Make the guard wider than the Boolean trim clearance so the
-# latter can never reach a retained flank through roundoff.
-PROTECTED_FLANK_GUARD_CHORD_FACTORS = 4.0
 PROTECTED_CONTACT_RESIDUAL_FACTOR = 1e-6
-ROLLING_MAX_PASSES = 8
-ROLLING_CONVERGENCE_AREA_FACTOR = 1e-9
 
 # Broad topology/fidelity guards. These are policy thresholds, not numerical
 # roundoff tolerances, and should be revisited with manufacturing validation.
