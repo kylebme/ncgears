@@ -105,6 +105,16 @@ def _assert_verified_pair(pair: ncgears.GearPair) -> None:
     assert pair.metadata["cutter_undercut_trim_scope"] == (
         "intersected_analytic_root_regions"
     )
+    assert pair.metadata["root_clearance"] == pytest.approx(pair.root_clearance)
+    assert pair.metadata["root_clearance_distance"] == pytest.approx(
+        pair.root_clearance * pair.metadata["module"]
+    )
+    assert pair.metadata["root_clearance_offset_scope"] == (
+        "cutter_generated_undercut_roots"
+    )
+    assert pair.metadata["root_clearance_offset_method"] == (
+        "normal_cutter_sweep_dilation"
+    )
     assert pair.metadata["cutter_undercut_vertices_per_addendum"] == 2
     assert pair.metadata["cutter_undercut_clipped_flank_count"] >= 0
     curve_count = pair.metadata["cutter_undercut_curve_count"]
@@ -620,6 +630,46 @@ def test_nonconvex_cusps_use_addendum_vertex_curve_undercuts(
     # scallops left by unions of many discrete solid-cutter poses.
     assert _severe_boundary_reversal_count(pair.drive_outline) < 200
     assert _severe_boundary_reversal_count(pair.driven_outline) < 200
+
+
+def test_root_clearance_normally_offsets_cutter_undercuts(tmp_path: Path) -> None:
+    common = {
+        "teeth": 36,
+        "samples": 1024,
+        "samples_per_radian": 20,
+        "output_directory": tmp_path,
+    }
+    baseline = ncgears.generate(
+        "phi + 0.0505*sin(4*phi)",
+        name="root_clearance_baseline",
+        **common,
+    )
+    cleared = ncgears.generate(
+        "phi + 0.0505*sin(4*phi)",
+        name="root_clearance_offset",
+        root_clearance=0.08,
+        **common,
+    )
+
+    _assert_verified_pair(cleared)
+    assert baseline.root_clearance == 0.0
+    assert cleared.root_clearance == pytest.approx(0.08)
+    assert cleared.metadata["root_clearance_distance"] == pytest.approx(0.08)
+    assert cleared.metadata["cutter_undercut_curve_count"] == baseline.metadata[
+        "cutter_undercut_curve_count"
+    ]
+    assert cleared.metadata["cutter_undercut_removed_area"] > baseline.metadata[
+        "cutter_undercut_removed_area"
+    ]
+
+    baseline_drive = Polygon(baseline.drive_outline)
+    baseline_driven = Polygon(baseline.driven_outline)
+    cleared_drive = Polygon(cleared.drive_outline)
+    cleared_driven = Polygon(cleared.driven_outline)
+    assert baseline_drive.difference(cleared_drive).area == pytest.approx(0.0)
+    assert baseline_driven.difference(cleared_driven).area > 1.0
+    assert cleared_driven.difference(baseline_driven).area < 1e-8
+    assert _severe_boundary_reversal_count(cleared.driven_outline) < 200
 
 
 def test_cutter_undercut_does_not_leave_root_side_flank_slivers(

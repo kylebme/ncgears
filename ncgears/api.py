@@ -108,6 +108,7 @@ def _validate_common(
     dedendum_factor: float,
     fillet_factor: float,
     clearance: float,
+    root_clearance: float,
     max_backlash_deg: float | None,
     drive_start: float,
     drive_end: float,
@@ -138,6 +139,8 @@ def _validate_common(
         raise ValueError("dedendum_factor must exceed fillet_factor")
     if not math.isfinite(clearance) or clearance < 0.0:
         raise ValueError("clearance must be finite and nonnegative")
+    if not math.isfinite(root_clearance) or root_clearance < 0.0:
+        raise ValueError("root_clearance must be finite and nonnegative")
     if max_backlash_deg is not None and (
         not math.isfinite(max_backlash_deg) or max_backlash_deg < 0.0
     ):
@@ -187,6 +190,7 @@ def _run_generator(
     dedendum_factor: float,
     fillet_factor: float,
     clearance: float,
+    root_clearance: float,
     max_backlash_deg: float | None,
     domain_start: float,
     domain_end: float,
@@ -219,6 +223,7 @@ def _run_generator(
             dedendum_factor=dedendum_factor,
             fillet_factor=fillet_factor,
             clearance=clearance,
+            root_clearance=root_clearance,
             max_backlash_deg=max_backlash_deg,
             domain_start=domain_start,
             domain_end=domain_end,
@@ -280,6 +285,7 @@ def generate_from_transmission(
     dedendum_factor: float = DEFAULT_DEDENDUM_FACTOR,
     fillet_factor: float = DEFAULT_FILLET_FACTOR,
     clearance: float = 0.0,
+    root_clearance: float = 0.0,
     max_backlash_deg: float | None = None,
     drive_start: float = 0.0,
     drive_end: float = 2.0 * math.pi,
@@ -301,9 +307,11 @@ def generate_from_transmission(
     outlines, verification metadata, preview rendering, and SVG/DXF exports.
 
     ``clearance`` is the inward face offset applied to each gear, normalized by
-    ``module``. Alternatively, ``max_backlash_deg`` derives that offset from
-    the requested maximum total angular free play of the driven gear. The two
-    options are mutually exclusive.
+    ``module``. ``root_clearance`` is an additional normal offset applied only
+    to cutter-generated undercut roots. Alternatively, ``max_backlash_deg``
+    derives the global face offset from the requested maximum total angular
+    free play of the driven gear. ``clearance`` and ``max_backlash_deg`` are
+    mutually exclusive.
     """
 
     _validate_common(
@@ -315,6 +323,7 @@ def generate_from_transmission(
         dedendum_factor=dedendum_factor,
         fillet_factor=fillet_factor,
         clearance=clearance,
+        root_clearance=root_clearance,
         max_backlash_deg=max_backlash_deg,
         drive_start=drive_start,
         drive_end=drive_end,
@@ -409,6 +418,7 @@ def generate_from_transmission(
         dedendum_factor=dedendum_factor,
         fillet_factor=fillet_factor,
         clearance=clearance,
+        root_clearance=root_clearance,
         max_backlash_deg=max_backlash_deg,
         domain_start=domain_start,
         domain_end=domain_end,
@@ -437,6 +447,7 @@ def generate_from_centrode(
     dedendum_factor: float = DEFAULT_DEDENDUM_FACTOR,
     fillet_factor: float = DEFAULT_FILLET_FACTOR,
     clearance: float = 0.0,
+    root_clearance: float = 0.0,
     max_backlash_deg: float | None = None,
     drive_start: float = 0.0,
     drive_end: float = 2.0 * math.pi,
@@ -457,8 +468,8 @@ def generate_from_centrode(
     The radius expression may use arbitrary units. It is scaled so the drive
     pitch length equals ``teeth * pi * module``. When no reference center
     distance is supplied, ncgears solves one for ``target_cycle_delta``.
-    ``clearance`` and ``max_backlash_deg`` have the same meanings as in
-    :func:`generate_from_transmission`.
+    ``clearance``, ``root_clearance``, and ``max_backlash_deg`` have the same
+    meanings as in :func:`generate_from_transmission`.
     """
 
     _validate_common(
@@ -470,6 +481,7 @@ def generate_from_centrode(
         dedendum_factor=dedendum_factor,
         fillet_factor=fillet_factor,
         clearance=clearance,
+        root_clearance=root_clearance,
         max_backlash_deg=max_backlash_deg,
         drive_start=drive_start,
         drive_end=drive_end,
@@ -546,6 +558,7 @@ def generate_from_centrode(
         dedendum_factor=dedendum_factor,
         fillet_factor=fillet_factor,
         clearance=clearance,
+        root_clearance=root_clearance,
         max_backlash_deg=max_backlash_deg,
         domain_start=domain_start,
         domain_end=domain_end,

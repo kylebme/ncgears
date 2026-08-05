@@ -295,13 +295,17 @@ def test_cli_accepts_module_relative_dxf_error() -> None:
     assert args.dxf_max_error == pytest.approx(0.0025)
 
 
-def test_cli_accepts_clearance_or_maximum_backlash() -> None:
-    clearance = build_parser().parse_args(["phi", "--clearance", "0.04"])
+def test_cli_accepts_clearance_root_clearance_or_maximum_backlash() -> None:
+    clearance = build_parser().parse_args(
+        ["phi", "--clearance", "0.04", "--root-clearance", "0.08"]
+    )
     backlash = build_parser().parse_args(["phi", "--max-backlash", "1.5"])
 
     assert clearance.clearance == pytest.approx(0.04)
+    assert clearance.root_clearance == pytest.approx(0.08)
     assert clearance.max_backlash_deg is None
     assert backlash.clearance == 0.0
+    assert backlash.root_clearance == 0.0
     assert backlash.max_backlash_deg == pytest.approx(1.5)
 
 
@@ -335,11 +339,13 @@ def test_transmission_frontend_forwards_normalized_clearance(tmp_path: Path) -> 
         ncgears.generate(
             "phi",
             clearance=0.04,
+            root_clearance=0.08,
             samples=1024,
             output_directory=tmp_path,
         )
 
     assert run.call_args.kwargs["clearance"] == pytest.approx(0.04)
+    assert run.call_args.kwargs["root_clearance"] == pytest.approx(0.08)
     assert run.call_args.kwargs["max_backlash_deg"] is None
 
 
@@ -387,6 +393,8 @@ def test_invalid_transmission_is_rejected(
     ("arguments", "message"),
     [
         ({"clearance": -0.01}, "clearance must be"),
+        ({"root_clearance": -0.01}, "root_clearance must be"),
+        ({"root_clearance": math.inf}, "root_clearance must be"),
         ({"max_backlash_deg": -1.0}, "max_backlash_deg must be"),
         (
             {"clearance": 0.02, "max_backlash_deg": 1.0},

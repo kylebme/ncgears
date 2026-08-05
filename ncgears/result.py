@@ -106,6 +106,12 @@ class GearPair:
         return float(self.metadata.get("clearance_module_fraction", 0.0))
 
     @property
+    def root_clearance(self) -> float:
+        """Normal offset of cutter-generated roots, normalized by module."""
+
+        return float(self.metadata.get("root_clearance_module_fraction", 0.0))
+
+    @property
     def minimum_backlash_deg(self) -> float:
         """Minimum total driven-gear angular free play, in degrees."""
 

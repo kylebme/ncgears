@@ -86,6 +86,7 @@ pair.driven_teeth
 pair.ratio
 pair.maximum_transmission_error
 pair.clearance                 # per-face inward offset / module
+pair.root_clearance            # cutter-generated root offset / module
 pair.minimum_backlash_deg      # total driven-gear angular free play
 pair.maximum_backlash_deg
 pair.metadata                 # complete verification report
@@ -113,6 +114,12 @@ Pass `clearance` to offset both finished gear solids inward, normal to every
 face. The value is dimensionless: `clearance=0.04` offsets each gear by
 `0.04 * module`, producing twice that normal separation between a mating pair
 of faces.
+
+Pass `root_clearance` to add clearance only at cutter-generated undercuts. It
+is also normalized by module: `root_clearance=0.08` expands the swept
+addendum-vertex cut by `0.08 * module`, normal to the sweep, before Boolean
+subtraction. This leaves the conjugate working flanks unchanged and can be
+combined with either form of global clearance.
 
 Alternatively, pass `max_backlash_deg` to specify the maximum conventional
 backlash: the total driven-gear rotation between contact on opposing flanks.
@@ -171,10 +178,11 @@ pitch-curve concavity. Exact addendum and dedendum offsets complete each tooth.
 When a cutter-generated root is needed, the engine traces the two addendum
 vertices of each opposing tooth instead of intersecting complete gear solids at
 hundreds of discrete poses. Penetrating trajectory spans are extended beyond
-their stock intersections, adaptively tessellated, closed, and subtracted only
-inside analytic root regions. After the raw cut, only the exposed flank segment
-connected to each addendum tip remains guarded, so a crossed root-side segment
-cannot survive as a narrow material sliver.
+their stock intersections, adaptively tessellated, closed, normally offset by
+the requested root clearance, and subtracted only inside analytic root regions.
+After the raw cut, only the exposed flank segment connected to each addendum tip
+remains guarded, so a crossed root-side segment cannot survive as a narrow
+material sliver.
 Finite open profiles clip each analytical curve in rolling-arc parameter space,
 then follow one quarter of the centrode back across the inner boundary.
 Source-domain padding is used only to solve endpoint teeth; it cannot change or

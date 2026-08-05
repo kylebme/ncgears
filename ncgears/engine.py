@@ -187,6 +187,7 @@ class EngineConfig:
     samples: FloatArray
     reference_center_distance: float = 0.0
     clearance: float = 0.0
+    root_clearance: float = 0.0
     max_backlash_deg: float | None = None
 
 
@@ -745,6 +746,7 @@ def load_engine_config(
     dedendum_factor: float,
     fillet_factor: float,
     clearance: float,
+    root_clearance: float,
     max_backlash_deg: float | None,
     domain_start: float,
     domain_end: float,
@@ -789,6 +791,7 @@ def load_engine_config(
         samples=samples,
         reference_center_distance=reference_center_distance,
         clearance=clearance,
+        root_clearance=root_clearance,
         max_backlash_deg=max_backlash_deg,
     )
 
@@ -985,6 +988,8 @@ class _GearGenerator:
             raise ValueError("Invalid cutter dimensions")
         if not math.isfinite(config.clearance) or config.clearance < 0.0:
             raise ValueError("Clearance must be finite and nonnegative")
+        if not math.isfinite(config.root_clearance) or config.root_clearance < 0.0:
+            raise ValueError("Root clearance must be finite and nonnegative")
         if config.max_backlash_deg is not None and (
             not math.isfinite(config.max_backlash_deg) or config.max_backlash_deg < 0.0
         ):
@@ -3374,7 +3379,8 @@ class _GearGenerator:
                     ]
                 )
             closed_curve = closed_curve.buffer(
-                _length_tolerance(
+                self.config.root_clearance * self.config.module
+                + _length_tolerance(
                     self.config.module,
                     UNDERCUT_VERTEX_BOOLEAN_CLEARANCE_FACTOR,
                 ),
@@ -4026,6 +4032,13 @@ class _GearGenerator:
             "clearance_distance": self.clearance_distance,
             "clearance_offset_scope": "both_gear_faces_inward",
             "clearance_offset_method": "constant_normal_polygon_erosion",
+            "root_clearance": self.config.root_clearance,
+            "root_clearance_module_fraction": self.config.root_clearance,
+            "root_clearance_distance": (
+                self.config.root_clearance * self.config.module
+            ),
+            "root_clearance_offset_scope": "cutter_generated_undercut_roots",
+            "root_clearance_offset_method": "normal_cutter_sweep_dilation",
             "requested_max_backlash_deg": self.config.max_backlash_deg,
             "minimum_backlash_deg": self.minimum_backlash_deg,
             "maximum_backlash_deg": self.maximum_backlash_deg,
